@@ -1,0 +1,1 @@
+/home/azizz/.cline/skills/bemsh-analyzer/SKILL.md

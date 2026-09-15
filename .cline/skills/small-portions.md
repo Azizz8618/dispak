@@ -1,0 +1,1 @@
+/home/azizz/.cline/skills/small-portions/SKILL.md

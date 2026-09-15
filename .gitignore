@@ -2,3 +2,6 @@
 *.run
 BUILD
 build
+.cline/maps/
+logs/
+debug*.txt
