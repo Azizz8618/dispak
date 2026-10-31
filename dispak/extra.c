@@ -1269,10 +1269,30 @@ e50_76(void)
 
 /*
  * Тома, захваченные экстракодом Э50 0157 в монопольное владение.
- * Захват относится к набору данных и держится до конца задачи, поэтому
- * отказ от МЛ/МД (Э72 с кодом 020) не должен его снимать.
+ * Захват относится к набору данных и держится до конца задачи или до
+ * явного освобождения Э50 0116, поэтому отказ от МЛ/МД (Э72 с кодом 020)
+ * его не снимает.
  */
 static uchar e50_157_locked[NDISKS];
+
+/*
+ * Разбор номера тома из младших 16 разрядов acc.r (двоично-десятичный).
+ * Возвращает 0 и записывает номер в *diskno либо -1 при ошибке.
+ */
+static int
+bcd_volume(int *diskno)
+{
+	unsigned bcd = acc.r & 0xffff;
+
+	if (((bcd >> 12) & 0xf) > 9 || ((bcd >> 8) & 0xf) > 9 ||
+	    ((bcd >> 4) & 0xf) > 9 || (bcd & 0xf) > 9)
+		return -1;
+	*diskno = ((bcd >> 12) & 0xf) * 1000 + ((bcd >> 8) & 0xf) * 100 +
+		((bcd >> 4) & 0xf) * 10 + (bcd & 0xf);
+	if (*diskno < 1 || *diskno > 4095)
+		return -1;
+	return 0;
+}
 
 int
 e50_157(void)
@@ -1285,16 +1305,10 @@ e50_157(void)
 	 * всегда успешен, если том существует.
 	 * Ответ: 0 — том захвачен текущей задачей, 1 — ошибка.
 	 */
-	unsigned bcd = acc.r & 0xffff;
 	unsigned u;
 	int diskno;
 
-	if (((bcd >> 12) & 0xf) > 9 || ((bcd >> 8) & 0xf) > 9 ||
-	    ((bcd >> 4) & 0xf) > 9 || (bcd & 0xf) > 9)
-		goto bad;
-	diskno = ((bcd >> 12) & 0xf) * 1000 + ((bcd >> 8) & 0xf) * 100 +
-		((bcd >> 4) & 0xf) * 10 + (bcd & 0xf);
-	if (diskno < 1 || diskno > 4095)
+	if (bcd_volume(&diskno))
 		goto bad;
 
 	/* Том уже привязан к какому-либо логическому каналу? */
@@ -1330,6 +1344,26 @@ e50_157(void)
 bad:
 	acc.l = 0;
 	acc.r = 1;
+	return E_SUCCESS;
+}
+
+/*
+ * Э50 0116 — освобождение набора данных (отказ от монопольного
+ * владения).  Идентификатор НД — тот же BCD-номер тома в младших
+ * 16 разрядах acc.r, что и у 0157.  Для незахваченного НД экстракод
+ * игнорируется; сам том остаётся привязанным к каналу.
+ */
+int
+e50_116(void)
+{
+	unsigned u;
+	int diskno;
+
+	if (bcd_volume(&diskno))
+		return E_SUCCESS;
+	for (u = 030; u < 070; ++u)
+		if (disks[u].diskno == diskno)
+			e50_157_locked[u] = 0;
 	return E_SUCCESS;
 }
 
@@ -1435,8 +1469,10 @@ e50(void)
 			1;
 		return E_SUCCESS;
 	}
-	case 0115: case 0116:	/* grab/release a volume */
+	case 0115:	/* grab a dataset (batch mode: always succeeds) */
 		return E_SUCCESS;
+	case 0116:	/* release a dataset from exclusive ownership */
+		return e50_116();
 	case 0121:		/* specify volume password */
 		return E_SUCCESS;
 	case 0127:		/* query presence of passwords */
