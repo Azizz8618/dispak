@@ -18,8 +18,9 @@
 
 **Связанные проекты:**
 - `~/Yandex.Disk/simh/BESM6/` — аппаратный эмулятор БЭСМ-6 (SIMH)
-- `~/Yandex.Disk/re_dispak/` — исходники модулей ОС Диспак (БЕМШ)
-- `~/Yandex.Disk/re-dispak/` — архив + встроенный dispak
+- `~/old_dispak/re_dispak/` — исходники модулей ОС Диспак (БЕМШ)
+- `~/old_dispak/re-dispak/` — архив + встроенный dispak (бывший `~/Yandex.Disk/re-dispak/`)
+- `~/Yandex.Disk/re-dispak/` — документация по ОС ДИСПАК (бывший `re_dispak/re-dispak/`)
 
 ## 2. Структура проекта
 
@@ -29,7 +30,7 @@
 |------|------------|------------|
 | `~/dispak/` | Оригинальный клон upstream | `https://github.com/besm6/dispak` |
 | `~/Yandex.Disk/dispak/` | Рабочая вилка (ИИ + документация) | fork от `~/dispak` |
-| `~/Yandex.Disk/re-dispak/.dispak/` | Встроенный dispak в re-dispak | upstream |
+| `~/old_dispak/re-dispak/.dispak/` | Встроенный dispak (архив re-dispak) | upstream |
 
 ### 2.2. Ключевые каталоги
 
@@ -210,10 +211,10 @@ EEВ1А3                     ← начало данных (ДН)
 тестирования ДКС/КАДОПАМ, реальной работы ОС. dispak быстрее, но не
 эмулирует аппаратуру.
 
-### 7.2. re-dispak (~/Yandex.Disk/re_dispak/)
+### 7.2. re-dispak (~/old_dispak/re_dispak/)
 
 Исходники модулей ОС Диспак (БЕМШ-ассемблер). Ключевые модули:
-ДИСП70, СВЯЗЬ7, КОНФУС, БОЭК1, МОТТ. Справочники: `ai/СПРАВОЧНИКИ.md`.
+ДИСП70, СВЯЗЬ7, КОНФУС, БОЭК1, МОТТ. Справочники: `~/Yandex.Disk/re-dispak/ai/СПРАВОЧНИКИ.md`.
 
 ### 7.3. Общая схема
 
@@ -246,7 +247,7 @@ dispak (пакетный)         simh/BESM6 (аппаратный)
 |--------|----------|
 | Оригинальный репозиторий | `https://github.com/besm6/dispak` |
 | SIMH BESM6 | `~/Yandex.Disk/simh/BESM6/` |
-| Исходники ОС Диспак | `~/Yandex.Disk/re_dispak/` |
+| Исходники ОС Диспак | `~/old_dispak/re_dispak/` |
 | Формат входа | `~/dispak/Input-Format` |
 | Mini-Supervisor | `~/dispak/Mini-Supervisor.txt` |
 | BESM6_PROJECTS.md | `~/Yandex.Disk/BESM6_PROJECTS.md` |
