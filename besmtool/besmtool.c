@@ -43,6 +43,9 @@ enum {
         OPT_FROM_START,
         OPT_TO_FILE,
         OPT_ENCODING,
+        OPT_LABEL,
+        OPT_ATTR,
+        OPT_SPECIAL,
 };
 
 /* Table of options. */
@@ -59,6 +62,9 @@ static struct option longopts[] = {
         { "from-start",         1,      0,      OPT_FROM_START  },
         { "to-file",            1,      0,      OPT_TO_FILE     },
         { "encoding",           1,      0,      OPT_ENCODING    },
+        { "label",              1,      0,      OPT_LABEL       },
+        { "attr",               1,      0,      OPT_ATTR        },
+        { "special",            0,      0,      OPT_SPECIAL     },
         { 0,                    0,      0,      0               },
 };
 
@@ -73,6 +79,10 @@ usage ()
         fprintf (stderr, "\tbesmtool list [<disk-number>]\n");
         fprintf (stderr, "\tbesmtool pass [<disk-number>]\n");
         fprintf (stderr, "\tbesmtool arfa <disk-number>\n");
+        fprintf (stderr, "\tbesmtool arfa-format <disk-number> [--label=<том>]\n");
+        fprintf (stderr, "\tbesmtool arfa-create <disk-number> <имя> [--start=<zone>]"
+                        " [--length=<nzones>] [--attr=XX] [--special]\n");
+        fprintf (stderr, "\tbesmtool arfa-destroy <disk-number> <имя>\n");
         fprintf (stderr, "\tbesmtool search <disk-number> <pattern>\n");
         fprintf (stderr, "\tbesmtool erase <disk-number> [<options>...]\n");
         fprintf (stderr, "\tbesmtool zero <disk-number> [<options>...]\n");
@@ -97,6 +107,11 @@ usage ()
         fprintf (stderr, "\t--from-disk=<disknum>\n");
         fprintf (stderr, "\t--from-dir=<dirname>\n");
         fprintf (stderr, "\t--from-start=<zone>\n");
+
+        fprintf (stderr, "Arfa options:\n");
+        fprintf (stderr, "\t--label=<том>      метка тома АРФЫ, до 6 символов (по умолчанию 001)\n");
+        fprintf (stderr, "\t--attr=XX         атрибут зонового слова, 0x60..0x77 (по умолчанию 0x68)\n");
+        fprintf (stderr, "\t--special         спецзапись (без файла данных)\n");
         exit (-1);
 }
 
@@ -106,6 +121,9 @@ main (int argc, char **argv)
         unsigned length = 0, from_diskno = 0, from_start = 0;
         int start = 0, last = -1;
         char *from_file = 0, *to_file = 0, *from_dir = 0, *view_encoding = "g,k";
+        char *arfa_label = "001";
+        unsigned arfa_attr = 0x68;
+        int arfa_special = 0;
         unsigned diskno;
         int c;
 
@@ -147,6 +165,15 @@ main (int argc, char **argv)
                 case OPT_ENCODING:
                         view_encoding = optarg;
                         break;
+                case OPT_LABEL:
+                        arfa_label = optarg;
+                        break;
+                case OPT_ATTR:
+                        arfa_attr = strtol (optarg, 0, 0);
+                        break;
+                case OPT_SPECIAL:
+                        arfa_special = 1;
+                        break;
                 }
         }
         argc -= optind;
@@ -167,6 +194,11 @@ main (int argc, char **argv)
                         fprintf (stderr, "Укажите номер диска: besmtool arfa <disk-number>\n");
                         return 0;
                 }
+                if (strcmp ("arfa-format", argv[0]) == 0) {
+                        fprintf (stderr, "Укажите номер диска: "
+                                "besmtool arfa-format <disk-number> [--label=<том>]\n");
+                        return 0;
+                }
                 break;
         case 2:
                 diskno = strtol (argv[1], 0, 0);
@@ -181,6 +213,11 @@ main (int argc, char **argv)
                 }
                 if (strcmp ("arfa", argv[0]) == 0) {
                         arfa_catalog (diskno);
+                        return 0;
+                }
+                if (strcmp ("arfa-format", argv[0]) == 0) {
+                        if (arfa_format (diskno, arfa_label) < 0)
+                                return 1;
                         return 0;
                 }
                 if (strcmp ("erase", argv[0]) == 0) {
@@ -223,6 +260,17 @@ main (int argc, char **argv)
 
                 if (strcmp ("search", argv[0]) == 0) {
                         search_disk (diskno, (unsigned char*) argv[2], start, length);
+                        return 0;
+                }
+                if (strcmp ("arfa-create", argv[0]) == 0) {
+                        if (arfa_create (diskno, argv[2], start, length,
+                                arfa_attr, arfa_special) < 0)
+                                return 1;
+                        return 0;
+                }
+                if (strcmp ("arfa-destroy", argv[0]) == 0) {
+                        if (arfa_destroy (diskno, argv[2]) < 0)
+                                return 1;
                         return 0;
                 }
                 break;
