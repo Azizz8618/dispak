@@ -1267,6 +1267,72 @@ e50_76(void)
 	return (E_SUCCESS);
 }
 
+/*
+ * Тома, захваченные экстракодом Э50 0157 в монопольное владение.
+ * Захват относится к набору данных и держится до конца задачи, поэтому
+ * отказ от МЛ/МД (Э72 с кодом 020) не должен его снимать.
+ */
+static uchar e50_157_locked[NDISKS];
+
+int
+e50_157(void)
+{
+	/*
+	 * Э50 0157 — запрос тома в монопольное владение с кодом ответа.
+	 * Информационное слово в ACC: младшие 16 разрядов (acc.r & 0xffff) —
+	 * номер тома в двоично-десятичном виде.  Пакетный диспак
+	 * однопользовательский: конкурирующих задач нет, поэтому захват
+	 * всегда успешен, если том существует.
+	 * Ответ: 0 — том захвачен текущей задачей, 1 — ошибка.
+	 */
+	unsigned bcd = acc.r & 0xffff;
+	unsigned u;
+	int diskno;
+
+	if (((bcd >> 12) & 0xf) > 9 || ((bcd >> 8) & 0xf) > 9 ||
+	    ((bcd >> 4) & 0xf) > 9 || (bcd & 0xf) > 9)
+		goto bad;
+	diskno = ((bcd >> 12) & 0xf) * 1000 + ((bcd >> 8) & 0xf) * 100 +
+		((bcd >> 4) & 0xf) * 10 + (bcd & 0xf);
+	if (diskno < 1 || diskno > 4095)
+		goto bad;
+
+	/* Том уже привязан к какому-либо логическому каналу? */
+	for (u = 030; u < 070; ++u) {
+		if (disks[u].diskno == diskno) {
+			e50_157_locked[u] = 1;
+			acc.l = 0;
+			acc.r = 0;
+			return E_SUCCESS;
+		}
+	}
+
+	/* Ищем свободный логический канал. */
+	for (u = 030; u < 070; ++u)
+		if (!disks[u].diskh && !disks[u].diskno)
+			break;
+	if (u >= 070)
+		goto bad;
+
+	if (!(disks[u].diskh = disk_open(diskno, DISK_READ_WRITE)))
+		goto bad;
+	disk_close(disks[u].diskh);
+	disks[u].diskh = 0;
+	disks[u].diskno = diskno;
+	disks[u].offset = 0;
+	disks[u].mode = DISK_READ_WRITE;
+	e50_157_locked[u] = 1;
+
+	acc.l = 0;
+	acc.r = 0;
+	return E_SUCCESS;
+
+bad:
+	acc.l = 0;
+	acc.r = 1;
+	return E_SUCCESS;
+}
+
 int
 e50(void)
 {
@@ -1439,6 +1505,8 @@ e50(void)
 			acc.r = 040;
 		return E_SUCCESS;
 	}
+	case 0157:	/* request volume in exclusive ownership, with answer code */
+		return e50_157();
 	case 0165:      /* BESM owner + version + sys. disk info */
 		acc.l = GOST_B << 8 | GOST_EL;
 		acc.r = GOST_A << 16 | GOST_DE << 8 | GOST_E;
@@ -2234,6 +2302,8 @@ resources(void)
 		    if (u == 077)
 			break;
 		    if (!disks[u].diskno)
+			continue;
+		    if (e50_157_locked[u])
 			continue;
 		    if (disks[u].diskh)
 			disk_close(disks[u].diskh);
