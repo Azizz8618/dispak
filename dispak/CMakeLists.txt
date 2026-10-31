@@ -62,6 +62,7 @@ add_executable(dispak
     errtxt.c
     vsinput.c
     dpout.c
+    arfa.c
     encoding.c
     getopt.c
     "${DEBUG_C}"

@@ -1,0 +1,3 @@
+--path=.:../../build/dispak
+-p
+arfa-e63.b6

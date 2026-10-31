@@ -1701,28 +1701,101 @@ e62(void)
         }
 }
 
+/*
+ * Константа 'КЛЮЧАР' в коде УПП (ГОСТ-10859):
+ * К=052 Л=053 Ю=075 Ч=067 А=040 Р=060.
+ */
+#define ARFA_KEY_L      052053075
+#define ARFA_KEY_R      067040060
+
+/* Текст "777777" (отмена ограничения времени) в коде УПП. */
+#define E63_CANCEL_L    0007007007
+#define E63_CANCEL_R    0007007007
+
+/* Установленное ограничение времени решения (Э63 2 и 3). */
+static int    e63_limit_set;
+static double e63_limit;
+
+/*
+ * Разбор текста "ЧЧММСС" с сумматора (шесть ГОСТ-цифр).
+ * Возвращает интервал в секундах или -1 при ошибке.
+ */
+static int
+e63_parse_time (void)
+{
+        int dig [6], i;
+        uint v [2] = { acc.l, acc.r };
+
+        for (i = 0; i < 6; ++i) {
+                int byte = i < 3 ? (int) (v [0] >> (16 - 8*i)) :
+                        (int) (v [1] >> (16 - 8*(i-3)));
+                byte &= 0xff;
+                if (byte < GOST_0 || byte > GOST_9)
+                        return -1;
+                dig [i] = byte - GOST_0;
+        }
+        if (dig [1] > 5 || dig [3] > 5)
+                return -1;
+        return ((dig [0] * 10 + dig [1]) * 3600 +
+                (dig [2] * 10 + dig [3]) * 60 +
+                dig [4] * 10 + dig [5]);
+}
+
+/*
+ * Установка/смена/снятие ограничения времени решения (Э63 2 и 3).
+ * Возбуждение авоста ИСТЕКЛО ВРЕМЯ ПО ЭК не эмулируется.
+ */
+static void
+e63_set_limit (int t, int reserve)
+{
+        struct timeval ct;
+        double now;
+
+        gettimeofday (&ct, NULL);
+        now = TIMEDIFF (start_time, ct) - excuse;
+        if (t < 0 || (double) t > 3600.0 - now) {
+                acc.l = acc.r = 0;         /* превышает оставшееся */
+                return;
+        }
+        e63_limit_set = 1;
+        e63_limit = reserve ? 3600.0 - t : now + t;
+}
+
 int
 e63(void)
 {
         struct timeval  ct;
+
+        /* Архивная система: на СМ - константа 'КЛЮЧАР',
+         * в адресной части - адрес информационных слов. */
+        if (acc.l == ARFA_KEY_L && acc.r == ARFA_KEY_R)
+                return arfa_e63 ();
 
         switch (reg[016]) {
         case 0: /* время до конца решения задачи в виде float */
                 acc.l = 0xd00000;
                 acc.r = 3600;
                 return E_SUCCESS;
-        case 1: {     /* вывод времени счета задачи на печать */
+        case 1: {     /* печать времени счета задачи */
                 char    buf [80];
                 uchar   gbuf [80];
                 uchar   *p;
                 int     n = 0;
+                double  used;
+                uint    secs, intr;
 
                 if (! pout_enable)
                         return E_SUCCESS;
                 gettimeofday(&ct, NULL);
+                used = TIMEDIFF(start_time, ct) - excuse;
+                if (used < 0)
+                        used = 0;
+                /* целые секунды - для детерминированности выдачи */
+                secs = (uint) used;
+                intr = secs * 50;   /* число прерываний по 20 мс */
                 snprintf (buf, sizeof (buf),
-                        "ВРЕМЯ СЧЕТА: %.0f СЕК",
-                        TIMEDIFF(start_time, ct) - excuse);
+                        "ВРЕМЯ СЧЕТА: %02d.%02d.%02d %o",
+                        secs / 3600, secs / 60 % 60, secs % 60, intr);
                 /* Перекодировка UTF-8 -> ГОСТ и печать. */
                 for (p = (uchar*) buf; *p && n < (int) sizeof (gbuf) - 1; )
                         gbuf [n++] = utf8_to_gost (&p);
@@ -1731,7 +1804,21 @@ e63(void)
                 fflush (stdout);
                 return E_SUCCESS;
         }
-        case 3:
+        case 2:       /* ограничение времени решения / его отмена */
+                if (acc.l == E63_CANCEL_L && acc.r == E63_CANCEL_R) {
+                        e63_limit_set = 0;   /* отмена по "777777" */
+                        return E_SUCCESS;
+                }
+                if (e63_limit_set) {       /* прежнее не отменено */
+                        e63_limit_set = 0;
+                        return E_SUCCESS;
+                }
+                e63_set_limit (e63_parse_time (), 0);
+                return E_SUCCESS;
+        case 3:       /* резервирование времени на обработку авоста */
+                if (e63_limit_set)
+                        return E_SUCCESS;   /* игнорируется */
+                e63_set_limit (e63_parse_time (), 1);
                 return E_SUCCESS;
         case 4:
                 gettimeofday(&ct, NULL);
@@ -1739,17 +1826,9 @@ e63(void)
                 acc.r = (uint) (TIMEDIFF(start_time, ct) - excuse) * 50;
                 return E_SUCCESS;
         default:
-                {
-                        if (acc.l == (GOST_K << 16 | GOST_EL << 8 | GOST_YU) &&
-                            acc.r == (GOST_CHE << 16 | GOST_A << 8 | GOST_P)) {
-                                reg[016] = 0;
-                                return E_SUCCESS;
-                        }
-                }
                 if (reg[016] > 7)
                         return physaddr();
-                else
-                        return E_UNIMP;
+                return E_UNIMP;
         }
 }
 

@@ -33,19 +33,19 @@ typedef unsigned int    uint;
 #define EXTERN  extern
 #endif
 
-#define _(string)	gettext(string)
+#define _(string)       gettext(string)
 
 #define JHBSZ   16
 #define JMP(addr)       { \
-	pc = (addr); \
-	right = 0; \
-	if (!supmode) { \
-		jhbuf[jhbi] = (abpc << 16) | pc; \
-		jhbi = (jhbi + 1) % JHBSZ; \
-	} \
+        pc = (addr); \
+        right = 0; \
+        if (!supmode) { \
+                jhbuf[jhbi] = (abpc << 16) | pc; \
+                jhbi = (jhbi + 1) % JHBSZ; \
+        } \
 }
 
-	/* basic constants */
+        /* basic constants */
 
 #define BPW     6                       /* bytes per word               */
 #define CLICKSZ 1024                    /* words per click              */
@@ -66,50 +66,50 @@ typedef unsigned int    uint;
 #define TRAPRETREG      032             /* trap return address reg      */
 #define INTRETREG       033             /* intr return address reg      */
 
-	/* auxiliary constants */
+        /* auxiliary constants */
 
 #define HALFW           0xffffffl       /* half word                    */
 
-	/* basic types */
+        /* basic types */
 
 typedef unsigned char   uchar;
 
 typedef struct  {
-	void            *diskh;
-	ushort          offset;
-	ushort          diskno;
-	ushort          mode;
+        void            *diskh;
+        ushort          offset;
+        ushort          diskno;
+        ushort          mode;
 }       ddisk_t;
 
 typedef union {
-	uchar   w_b[BPW];
-	ushort  w_s[BPW / 2];
+        uchar   w_b[BPW];
+        ushort  w_s[BPW / 2];
 }       word_t;                         /* word type                    */
 
 typedef struct  {
-	uint    l;			/* left 24 bits */
-	uint    r;			/* right 24 bits */
-	ushort  o;			/* exponent (temp storage) */
-	uint    ml;			/* left part of mantissa */
+        uint    l;                      /* left 24 bits */
+        uint    r;                      /* right 24 bits */
+        ushort  o;                      /* exponent (temp storage) */
+        uint    ml;                     /* left part of mantissa */
 #define mr      r
 }       alureg_t;                       /* ALU register type            */
 
 typedef ushort  reg_t;                  /* register type                */
 
 typedef struct  {                       /* pointer to a byte            */
-	ushort  p_w;
-	ushort  p_b;
+        ushort  p_w;
+        ushort  p_b;
 }       ptr;
 
 #define w_sh    w_s[0]                  /* hi part                      */
 #define w_sm    w_s[1]                  /* med part                     */
 #define w_sl    w_s[2]                  /* lo part                      */
 
-	/* access to word halves                                        */
+        /* access to word halves                                        */
 #define w_lhalf(w)      ((((w).w_sm << 16) | (w).w_sl) & HALFW)
 #define w_hhalf(w)      (((long)(w).w_sh << 8) | (w).w_b[2])
 
-	/* access to instruction fields */
+        /* access to instruction fields */
 
 #ifndef WORDS_BIGENDIAN
 
@@ -120,14 +120,14 @@ typedef struct  {                       /* pointer to a byte            */
 #define Lstruct(w)      ((w).w_b[0] & 8)        /* 1-st structure flag  */
 #define Lexp(w)         ((w).w_b[0] & 4)        /* address expansion    */
 #define Lop1(w)         ((((w).w_b[1] >> 7) |                           \
-		((w).w_b[0] << 1)) & 0xf)       /* 1-st structure op    */
+                ((w).w_b[0] << 1)) & 0xf)       /* 1-st structure op    */
 #define Lop2(w)         ((((w).w_b[1] >> 4) |                           \
-		((w).w_b[0] << 4)) & 0x3f)      /* 2-nd structure op    */
+                ((w).w_b[0] << 4)) & 0x3f)      /* 2-nd structure op    */
 #define Lopcode(w)      (Lstruct(w) ? Lop1(w) | 0100 : Lop2(w))
 #define Laddr1(w)       ((((w).w_b[1] << 8) | (w).w_b[2]) & 0x7fff)
 #define Laddr2(w)       ((((w).w_b[1] << 8) | (w).w_b[2]) & 0xfff)
 #define Laddr(w)        (Lstruct(w) ? Laddr1(w) : Laddr2(w) |   \
-			(Lexp(w) ? 070000 : 0)) /* address field        */
+                        (Lexp(w) ? 070000 : 0)) /* address field        */
 
 /*
  *      right instruction
@@ -136,14 +136,14 @@ typedef struct  {                       /* pointer to a byte            */
 #define Rstruct(w)      ((w).w_b[3] & 8)        /* 1-st structure flag  */
 #define Rexp(w)         ((w).w_b[3] & 4)        /* address expansion    */
 #define Rop1(w)         ((((w).w_b[4] >> 7) |                           \
-		((w).w_b[3] << 1)) & 0xf)       /* 1-st structure op    */
+                ((w).w_b[3] << 1)) & 0xf)       /* 1-st structure op    */
 #define Rop2(w)         ((((w).w_b[4] >> 4) |                           \
-		((w).w_b[3] << 4)) & 0x3f)      /* 2-nd structure op    */
+                ((w).w_b[3] << 4)) & 0x3f)      /* 2-nd structure op    */
 #define Ropcode(w)      (Rstruct(w) ? Rop1(w) | 0100 : Rop2(w))
 #define Raddr1(w)       ((((w).w_b[4] << 8) | (w).w_b[5]) & 0x7fff)
 #define Raddr2(w)       ((((w).w_b[4] << 8) | (w).w_b[5]) & 0xfff)
 #define Raddr(w)        (Rstruct(w) ? Raddr1(w) : Raddr2(w) |   \
-			(Rexp(w) ? 070000 : 0)) /* address field        */
+                        (Rexp(w) ? 070000 : 0)) /* address field        */
 #else
 
 /*
@@ -158,7 +158,7 @@ typedef struct  {                       /* pointer to a byte            */
 #define Laddr1(w)       ((((w).w_b[1] << 8) & 0x7f00) | (w).w_b[2])
 #define Laddr2(w)       ((((w).w_b[1] << 8) & 0x0f00) | (w).w_b[2])
 #define Laddr(w)        (Lstruct(w) ? Laddr1(w) : Laddr2(w) |   \
-			(Lexp(w) ? 070000 : 0)) /* address field        */
+                        (Lexp(w) ? 070000 : 0)) /* address field        */
 
 /*
  *      right instruction
@@ -167,23 +167,23 @@ typedef struct  {                       /* pointer to a byte            */
 #define Rstruct(w)      ((w).w_b[3] & 8)        /* 1-st structure flag  */
 #define Rexp(w)         ((w).w_b[3] & 4)        /* address expansion    */
 #define Rop1(w)         ((((w).w_b[4] >> 7) |                           \
-		((w).w_b[3] << 1)) & 0xf)       /* 1-st structure op    */
+                ((w).w_b[3] << 1)) & 0xf)       /* 1-st structure op    */
 #define Rop2(w)         ((((w).w_b[4] >> 4) |                           \
-		((w).w_b[3] << 4)) & 0x3f)      /* 2-nd structure op    */
+                ((w).w_b[3] << 4)) & 0x3f)      /* 2-nd structure op    */
 #define Ropcode(w)      (Rstruct(w) ? Rop1(w) | 0100 : Rop2(w))
 #define Raddr1(w)       ((w).w_sl & 0x7fff)
 #define Raddr2(w)       ((w).w_sl & 0xfff)
 #define Raddr(w)        (Rstruct(w) ? Raddr1(w) : Raddr2(w) |   \
-			(Rexp(w) ? 070000 : 0)) /* address field        */
+                        (Rexp(w) ? 070000 : 0)) /* address field        */
 #endif
 
 /*
  *      "shadow instruction core" word structure
  */
 typedef struct  {
-	uchar   i_reg;                  /* register #                   */
-	uchar   i_opcode;               /* opcode                       */
-	ushort  i_addr;                 /* address field                */
+        uchar   i_reg;                  /* register #                   */
+        uchar   i_opcode;               /* opcode                       */
+        ushort  i_addr;                 /* address field                */
 }       uinstr_t;                       /* unpacked instruction         */
 
 EXTERN uinstr_t uicore[CORESZ * 2][2];
@@ -194,7 +194,7 @@ EXTERN uchar    cflags[CORESZ * 2];     /* core flags                   */
 #define C_BPT           2               /* breakpoint here              */
 #define C_BPW           4               /* break on write               */
 #define C_STOPPED       8               /* stopped on op33              */
-#define C_NEXT		16		/* breakpoint here once		*/
+#define C_NEXT          16              /* breakpoint here once         */
 /*
  *      "hardware" objects
  */
@@ -203,8 +203,8 @@ EXTERN uchar    cflags[CORESZ * 2];     /* core flags                   */
 
 EXTERN word_t   core[CORESZ * 2];       /* main memory                  */
 
-#define CV_NUMBER	1
-EXTERN uchar	convol[CORESZ * 2];	/* convolution of memory */
+#define CV_NUMBER       1
+EXTERN uchar    convol[CORESZ * 2];     /* convolution of memory */
 
 EXTERN reg_t    reg[NREGS];             /* registers                    */
 
@@ -220,8 +220,8 @@ EXTERN reg_t    supmode;                /* 0100000 - supervisor mode    */
 EXTERN reg_t    sup_mmap;               /* 0100000 - supervisor mem map */
 
 EXTERN union    {
-	uchar   gc_au[4];               /* arith cond jump modes        */
-	uint    gl_au;
+        uchar   gc_au[4];               /* arith cond jump modes        */
+        uint    gl_au;
 }       augroup;
 
 EXTERN uchar    dis_exc;                /* disable arith exceptions     */
@@ -247,11 +247,11 @@ EXTERN uchar    dis_norm;               /* disable normalization        */
 #define NEXT            goto _cont
 #define STOP            goto _stop
 #define ABORT(ERR)      { \
-	pcm_dbg = pcm; \
-	if ((err = _abort((ERR)))) \
-		STOP; \
-	else \
-		NEXT; \
+        pcm_dbg = pcm; \
+        if ((err = _abort((ERR)))) \
+                STOP; \
+        else \
+                NEXT; \
 }
 
 #define ADDR(x) ((ushort)(x) & 077777)
@@ -261,43 +261,43 @@ EXTERN uchar    dis_norm;               /* disable normalization        */
 
 #define LOAD(reg,addr) \
 if ((addr) & 077777) { \
-	uchar *_cp = core[addr].w_b; \
-	(reg).l = ((long) _cp[0] << 16) | (_cp[1] << 8) | _cp[2]; \
-	(reg).r = ((long) _cp[3] << 16) | (_cp[4] << 8) | _cp[5]; \
+        uchar *_cp = core[addr].w_b; \
+        (reg).l = ((long) _cp[0] << 16) | (_cp[1] << 8) | _cp[2]; \
+        (reg).r = ((long) _cp[3] << 16) | (_cp[4] << 8) | _cp[5]; \
 } else if (1) { \
-	(reg).l = 0; \
-	(reg).r = 0; \
+        (reg).l = 0; \
+        (reg).r = 0; \
 }
 
 #define STORE(reg,addr) \
-	if (addr) { \
-		uchar *_cp = core[addr].w_b; \
-		unsigned long _l; \
-		if (C_BPW & cflags[addr]) {\
-			where();\
-			for (cmdflg = 1; cmdflg; command());\
-		}\
-		_l = (reg).l; \
-		_cp[0] = _l >> 16; \
-		_cp[1] = _l >> 8; \
-		_cp[2] = _l; \
-		_l = (reg).r; \
-		_cp[3] = _l >> 16; \
-		_cp[4] = _l >> 8; \
-		_cp[5] = _l; \
-		cflags[addr] &= ~C_UNPACKED; \
-		if (spec) convol[addr] &= ~CV_NUMBER; else convol[addr] |= CV_NUMBER; \
-	} else
+        if (addr) { \
+                uchar *_cp = core[addr].w_b; \
+                unsigned long _l; \
+                if (C_BPW & cflags[addr]) {\
+                        where();\
+                        for (cmdflg = 1; cmdflg; command());\
+                }\
+                _l = (reg).l; \
+                _cp[0] = _l >> 16; \
+                _cp[1] = _l >> 8; \
+                _cp[2] = _l; \
+                _l = (reg).r; \
+                _cp[3] = _l >> 16; \
+                _cp[4] = _l >> 8; \
+                _cp[5] = _l; \
+                cflags[addr] &= ~C_UNPACKED; \
+                if (spec) convol[addr] &= ~CV_NUMBER; else convol[addr] |= CV_NUMBER; \
+        } else
 
 #define UNPCK(R)        { \
-	(R).o = ((R).l >> 17) & 0x7f; \
-	(R).ml = (R).l & 0x1ffff; \
-/*	(R).mr = (R).r; */ \
-	(R).ml |= ((R).ml & 0x10000) << 1; \
+        (R).o = ((R).l >> 17) & 0x7f; \
+        (R).ml = (R).l & 0x1ffff; \
+/*      (R).mr = (R).r; */ \
+        (R).ml |= ((R).ml & 0x10000) << 1; \
 }
 #define PACK(R) { \
-	(R).l = (long) ((R).o << 17) | ((R).ml & 0x1ffff); \
-/*	(R).r = (R).mr; */ \
+        (R).l = (long) ((R).o << 17) | ((R).ml & 0x1ffff); \
+/*      (R).r = (R).mr; */ \
 }
 
 void NEGATE(alureg_t *pR);
@@ -319,31 +319,31 @@ void NEGATE(alureg_t *pR);
 #define NDISKS          (64 + OSD_NUM)
 
 #define NDISK(d)        ((((d) >> 12) & 0xf) * 1000 + \
-				(((d) >> 8) & 0xf) * 100 + \
-				(((d) >> 4) & 0xf) * 10 + \
-				((d) & 0xf))
+                                (((d) >> 8) & 0xf) * 100 + \
+                                (((d) >> 4) & 0xf) * 10 + \
+                                ((d) & 0xf))
 
 #define TIMEDIFF(t1,t2)  ((double)(t2.tv_sec - t1.tv_sec) +\
-				(t2.tv_usec - t1.tv_usec) / 1000000.0)
+                                (t2.tv_usec - t1.tv_usec) / 1000000.0)
 
 
 EXTERN alureg_t         zeroword;
 EXTERN int              visual;         /* print registers before entering co */
 EXTERN int              breakflg;       /* break on next command */
 EXTERN int              notty;
-EXTERN int		spec, spec_saved; /* store insns store executable words */
-EXTERN int		pspspec;        /* "special" mode requested in the passport */
-EXTERN int		no_insn_check;	/* ignore number mode except addr 0 */
+EXTERN int              spec, spec_saved; /* store insns store executable words */
+EXTERN int              pspspec;        /* "special" mode requested in the passport */
+EXTERN int              no_insn_check;  /* ignore number mode except addr 0 */
 EXTERN int              stepflg;        /* "step" command flag */
 EXTERN int              cmdflg;         /* command  loop  flag */
-EXTERN int		quitflg;	/* "quit" command flag */
+EXTERN int              quitflg;        /* "quit" command flag */
 EXTERN int              trace;          /* trace flag */
-EXTERN int              trace_e64;	/* trace extracode 064 */
+EXTERN int              trace_e64;      /* trace extracode 064 */
 EXTERN int              stats;          /* gather statistics flag */
 EXTERN char             *lineptr;
-EXTERN char		*punchfile;	/* card puncher file */
-EXTERN uchar		punch_binary;	/* punch in binary format */
-EXTERN uchar		punch_unicode;	/* punch in unicode format */
+EXTERN char             *punchfile;     /* card puncher file */
+EXTERN uchar            punch_binary;   /* punch in binary format */
+EXTERN uchar            punch_unicode;  /* punch in unicode format */
 EXTERN char             *ifile;         /* source code  */
 EXTERN jmp_buf          top;
 EXTERN ddisk_t          disks[NDISKS];  /* disks & drums        */
@@ -351,12 +351,12 @@ EXTERN void             *drumh;         /* our drums            */
 EXTERN unsigned         lpbufh;         /* lpr buffer handle    */
 EXTERN ushort           abpc;
 EXTERN uchar            abright;
-EXTERN uchar            pout_enable;	/* e64 printing allowed */
-EXTERN uchar            pout_disable;	/* e64 printing suppressed */
-EXTERN char		*pout_file;	/* e64 output file name */
+EXTERN uchar            pout_enable;    /* e64 printing allowed */
+EXTERN uchar            pout_disable;   /* e64 printing suppressed */
+EXTERN char             *pout_file;     /* e64 output file name */
 EXTERN uchar            xnative;        /* native xcodes */
 EXTERN uchar            enative;        /* native elem. funcs */
-EXTERN uchar		bootstrap;	/* run without disk 2099 */
+EXTERN uchar            bootstrap;      /* run without disk 2099 */
 EXTERN ushort           lasterr;
 EXTERN ushort           intercept;
 EXTERN ushort           ninter;
@@ -380,8 +380,8 @@ extern void     stopwatch(void), startwatch(void);
 extern uchar    eraise(uint newev);
 extern void     alrm_handler(int sig);
 extern uint     to_2_10(uint src);
-extern uint	ticks_since_midnight();
-extern uint64_t	userid();
+extern uint     ticks_since_midnight();
+extern uint64_t userid();
 
 /*
  *      error codes
@@ -396,13 +396,13 @@ extern uint64_t	userid();
 #define E_ZERODIV       14              /* division by zero             */
 #define E_OVFL          15              /* overflow                     */
 #define E_CWERR         34              /* illegal ecode cw             */
-#define E_CHECK		20		/* instruction check		*/
+#define E_CHECK         20              /* instruction check            */
 #define E_DISKERR       42              /* self xplntry */
 #define E_RESOP         46              /* err in e72 cw */
-#define E_ASIN		52		/* asin(x), |x| < 1 */
-#define E_SQRT		53		/* sqrt(x), x < 0 */
-#define E_ALOG		54		/* log(x), x <= 0 */
-#define E_EXP		55		/* exp(x), x > 44 */
+#define E_ASIN          52              /* asin(x), |x| < 1 */
+#define E_SQRT          53              /* sqrt(x), x < 0 */
+#define E_ALOG          54              /* log(x), x <= 0 */
+#define E_EXP           55              /* exp(x), x > 44 */
 #define E_TERM          1               /* normal termination   */
 #define E_MAX           81
 
@@ -422,6 +422,7 @@ int e60 (void);
 int e61 (void);
 int e62 (void);
 int e63 (void);
+int arfa_e63 (void);
 
 /* arith.c */
 int add (void);
