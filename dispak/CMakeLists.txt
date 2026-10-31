@@ -36,10 +36,17 @@ include(CheckSymbolExists)
 check_symbol_exists(getopt_long "getopt.h" HAVE_GETOPT_LONG)
 
 #
-# Need Bison parser.
+# Need Bison parser.  When bison is not available (e.g. a minimal
+# build host), fall back to the checked-in hand-written debug.c.
 #
-find_package(BISON REQUIRED)
-bison_target(debug debug.y "${CMAKE_CURRENT_BINARY_DIR}/debug.c")
+find_package(BISON)
+if (BISON_FOUND)
+    bison_target(debug debug.y "${CMAKE_CURRENT_BINARY_DIR}/debug.c")
+    set(DEBUG_C "${CMAKE_CURRENT_BINARY_DIR}/debug.c")
+else ()
+    message(STATUS "Bison not found - using pregenerated debug.c")
+    set(DEBUG_C "${CMAKE_CURRENT_SOURCE_DIR}/debug.c")
+endif ()
 
 #
 # Build 'dispak' binary.
@@ -57,7 +64,7 @@ add_executable(dispak
     dpout.c
     encoding.c
     getopt.c
-    "${CMAKE_CURRENT_BINARY_DIR}/debug.c"
+    "${DEBUG_C}"
 )
 target_link_libraries(dispak PUBLIC m)
 target_compile_options(dispak PRIVATE
