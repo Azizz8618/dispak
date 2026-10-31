@@ -16,6 +16,7 @@ add_executable(besmtool
     list.c
     erase.c
     passports.c
+    arfa.c
     ../dispak/disk.c
     ../dispak/encoding.c
 )
