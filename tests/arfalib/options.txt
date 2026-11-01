@@ -1,0 +1,3 @@
+--path=.:../../build/dispak
+-p
+testarfa.b6

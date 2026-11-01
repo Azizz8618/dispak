@@ -5,8 +5,7 @@
 eeв1а3
 *name
 *call yesmemory
-*perso:402030
-*perso:402560,cont
+*perso:402570
 *stand
 *call *pascal
 program monitor(output, input);(*=y+,s7*)
@@ -309,7 +308,6 @@ begin
   until cmd = 'E';
   writeln('КОНЕЦ РАБОТЫ МОНИТОРА')
 end.
-*perso:402000,cont
 *execute
 D 1
 D 2

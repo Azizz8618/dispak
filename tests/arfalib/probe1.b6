@@ -1,0 +1,26 @@
+шифр 419999 зс5^
+лен 40(2348)^
+лен 67(2148)^
+eeв1а3
+*name
+*call yesmemory
+*personal library:670440
+*pascal
+program t(output);
+type
+  w2 = packed record l, r: 0..16777215 end;
+var
+  i: integer;
+  a: alfa;
+  w: w2;
+begin
+  besm(360100B-36);
+  i := ;
+  a := ;
+  w := ;
+  writeln('probe done')
+end.
+*execute
+*end file
+``````
+ЕКОНЕЦ
