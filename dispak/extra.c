@@ -1367,6 +1367,108 @@ e50_116(void)
         return E_SUCCESS;
 }
 
+/*
+ * Признак архивного тома (Э50 0166).
+ *
+ * В ОС ДИСПАК том, занесённый в состав архива, несёт в паспорте
+ * признак, защищающий его от прямого обращения экстракодом обмена
+ * (руководство системного программиста, п. 8.6.1 "УСТСНЯ"); установка,
+ * снятие и выдача признака выполняются экстракодом Э50 0166
+ * (ИР 050, АИСП=166(8), И15 = 0/1/2, номер тома в 16-1 разрядах СМ).
+ *
+ * В паспорте тома (логическая зона 0) признак хранится байтом 4
+ * слова 0007: 0 - не архивный, 2 - архивный (значение в реальных
+ * томах АРФА 2095/2096).  Экстракод обмена Э70 с томом, имеющим
+ * признак, завершается ошибкой E_CWERR.
+ */
+#define ARFA_PASS_BYTE  (6*0007 + 4)    /* байт признака в зоне 0 */
+#define ARFA_PASS_SET   0x02            /* признак установлен */
+
+static unsigned arfa_flag_disk;         /* том, для которого известен признак */
+static uchar    arfa_flag_val;
+static uchar    arfa_flag_known;
+
+/* Чтение признака архивного тома из паспорта (зона 0).  0 - успех. */
+static int
+arfa_flag_get (unsigned diskno, unsigned char *flag)
+{
+        void * disk = disk_open (diskno, DISK_READ_ONLY);
+        unsigned char data [ZONE_SIZE];
+
+        if (! disk)
+                return -1;
+        if (disk_readi (disk, 0, (char*) data, NULL, NULL,
+                        DISK_MODE_QUIET) != DISK_IO_OK) {
+                disk_close (disk);
+                return -1;
+        }
+        disk_close (disk);
+        *flag = data [ARFA_PASS_BYTE];
+        return 0;
+}
+
+/* Признак установлен?  (с кэшированием последнего чтения) */
+static int
+arfa_protected (unsigned diskno)
+{
+        if (! arfa_flag_known || arfa_flag_disk != diskno) {
+                if (arfa_flag_get (diskno, &arfa_flag_val))
+                        arfa_flag_val = 0;
+                arfa_flag_disk = diskno;
+                arfa_flag_known = 1;
+        }
+        return arfa_flag_val == ARFA_PASS_SET;
+}
+
+/*
+ * Э50 0166 - занесение/уничтожение/выдача признака архивного тома.
+ * СМ (16-1 разряды) - номер тома в двоично-десятичном виде;
+ * И15: 0 - занести признак, 1 - уничтожить, 2 - выдать.
+ * Ответ на запрос (И15=2): СМ = 0 (не архивный) или 1 (архивный).
+ */
+static int
+e50_166 (void)
+{
+        unsigned char data [ZONE_SIZE], convol [1024];
+        int num, op = reg [15] & 3;
+        void * disk;
+
+        if (getenv ("BESM6_ARFA_DEBUG"))
+                fprintf (stderr, "Э50 0166: И15=%o СМ=%o_%o\n",
+                        reg [15], acc.l, acc.r);
+        if (bcd_volume (& num))
+                return E_CWERR;
+        if (op == 2) {                  /* выдача признака */
+                unsigned char flag = 0;
+                if (! arfa_flag_get (num, &flag))
+                        arfa_flag_val = flag, arfa_flag_disk = num,
+                        arfa_flag_known = 1;
+                acc.l = 0;
+                acc.r = (flag == ARFA_PASS_SET) ? 1 : 0;
+                return E_SUCCESS;
+        }
+        /* занести / уничтожить признак: правка паспорта (зона 0) */
+        if (! (disk = disk_open (num, DISK_READ_WRITE)))
+                return E_SUCCESS;       /* том недоступен - правки нет */
+        if (disk_readi (disk, 0, (char*) data, NULL, NULL,
+                        DISK_MODE_QUIET) != DISK_IO_OK) {
+                disk_close (disk);
+                return E_SUCCESS;
+        }
+        data [ARFA_PASS_BYTE] = (op == 0) ? ARFA_PASS_SET : 0;
+        memset (convol, 1, sizeof (convol));    /* слова данных */
+        if (disk_writei (disk, 0, (char*) data, (char*) convol, NULL,
+                        DISK_MODE_QUIET) != DISK_IO_OK) {
+                disk_close (disk);
+                return E_INT;
+        }
+        disk_close (disk);
+        arfa_flag_val = data [ARFA_PASS_BYTE];
+        arfa_flag_disk = num;
+        arfa_flag_known = 1;
+        return E_SUCCESS;
+}
+
 int
 e50(void)
 {
@@ -1551,6 +1653,8 @@ e50(void)
                 reg[016] = 0x222;
                 reg[015] = 2053;
                 return E_SUCCESS;
+        case 0166:      /* признак архивного тома */
+                return e50_166 ();
         case 0177:      /* resource request     */
                 acc.l = acc.r = 0;
                 return E_SUCCESS;
@@ -1918,6 +2022,13 @@ ddio(void)
         cwadj(&uir);
         addr = (uil.i_addr & 03700) << 4;   // адрес листа
         u = uir.i_opcode & 077;             // номер диска
+        /* Том с признаком архивного закрыт для прямого обмена (Э50 0166).
+         * Исключение - лог.номер, к которому Э63 подключил ОБЛАСТЬ архива:
+         * это санкционированный АРФОЙ доступ, он разрешён. */
+        if (u >= 030 && u < 070 && disks[u].diskno &&
+            ! arfa_area_unit (u) &&
+            arfa_protected (disks[u].diskno))
+                return E_CWERR;
         if ((u < 030) || (u >= 070))
                 zone = uir.i_addr & 037;    // тракт барабана
         else

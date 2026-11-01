@@ -51,6 +51,11 @@
 static const int arfa_copy_zones [] = { 1, 011, 017, 020, 023 };
 #define ARFA_NCOPIES (sizeof (arfa_copy_zones) / sizeof (arfa_copy_zones [0]))
 
+/* Признак архивного тома (см. arfa_flag_cmd ниже) */
+#define ARFA_PASS_BYTE  (6*0007 + 4)
+#define ARFA_PASS_SET   0x02
+static int      arfa_passport_flag (unsigned diskno, unsigned char *flag);
+
 /* Данные областей не размещаются раньше конца копий каталога */
 #define ARFA_DATA_MIN  0030
 
@@ -394,6 +399,13 @@ arfa_catalog (unsigned diskno)
         printf (" ");
         print_name (data + ARFA_VOL_WORD*6);
         printf ("\n");
+        {
+                unsigned char flag = 0;
+                if (! arfa_passport_flag (diskno, &flag) &&
+                    flag == ARFA_PASS_SET)
+                        printf ("  Признак архивного тома: ЕСТЬ "
+                                "(том закрыт для СЕРПа и Э70)\n");
+        }
         printf ("  Копии каталога: зоны");
         for (i = 0; i < ncopy; ++i)
                 printf (" %04o", copies[i]);
@@ -419,18 +431,131 @@ arfa_catalog (unsigned diskno)
 }
 
 /*
- * Разметка тома АРФЫ: паспорт и пустой каталог в зонах
- * 1, 011, 017, 020, 023. Зона 0 (паспорт тома ДИСПАК) и прочие
- * зоны диска не изменяются. Уже размеченный том повторно
- * не размечается. Возвращает 0 при успехе.
+ * Признак архивного тома (Э50 0166) хранится в паспорте тома
+ * (логическая зона 0), байт 4 слова 0007: 0 - не архивный,
+ * 2 - архивный. Том с признаком закрыт для прямого обращения
+ * экстракодом обмена (Э70), что делает его невидимым для СЕРПа.
+ */
+
+/* Чтение признака архивного тома из паспорта. 0 - успех. */
+static int
+arfa_passport_flag (unsigned diskno, unsigned char *flag)
+{
+        void *disk = disk_open (diskno, DISK_READ_ONLY);
+        unsigned char data [ZBYTES];
+
+        if (! disk)
+                return -1;
+        if (disk_read (disk, 0, (char*) data) != DISK_IO_OK) {
+                disk_close (disk);
+                return -1;
+        }
+        disk_close (disk);
+        *flag = data [ARFA_PASS_BYTE];
+        return 0;
+}
+
+/*
+ * Установка/снятие/выдача признака архивного тома
+ * (аналог Э50 0166 и программы УСТСНЯ).
+ * action: NULL или "" - выдать, "on" - занести, "off" - уничтожить.
+ * Возвращает 0 при успехе, -1 при ошибке; для запроса - значение признака.
+ */
+int
+arfa_flag_cmd (unsigned diskno, const char *action)
+{
+        void *disk;
+        unsigned char data [ZBYTES], convol [1024];
+        unsigned char flag;
+
+        if (! action || ! *action || strcmp (action, "query") == 0) {
+                if (arfa_passport_flag (diskno, &flag)) {
+                        fprintf (stderr, "Диск %d: паспорт не читается\n",
+                                diskno);
+                        return -1;
+                }
+                printf ("Диск %d: признак архивного тома: %s\n", diskno,
+                        flag == ARFA_PASS_SET ? "ЕСТЬ" : "нет");
+                return flag == ARFA_PASS_SET;
+        }
+        if (strcmp (action, "on") && strcmp (action, "off")) {
+                fprintf (stderr, "besmtool arfa-flag: действие '%s' "
+                        "неизвестно (on|off|query)\n", action);
+                return -1;
+        }
+        disk = disk_open (diskno, DISK_READ_WRITE);
+        if (! disk) {
+                fprintf (stderr, "Диск %d: не открывается на запись\n", diskno);
+                return -1;
+        }
+        if (disk_read (disk, 0, (char*) data) != DISK_IO_OK) {
+                fprintf (stderr, "Диск %d: зона 0 не читается\n", diskno);
+                disk_close (disk);
+                return -1;
+        }
+        data [ARFA_PASS_BYTE] = strcmp (action, "on") == 0 ?
+                ARFA_PASS_SET : 0;
+        memset (convol, 1, sizeof (convol));    /* слова данных */
+        if (disk_writei (disk, 0, (char*) data, (char*) convol, NULL,
+                        DISK_MODE_QUIET) != DISK_IO_OK) {
+                fprintf (stderr, "Диск %d: зона 0 не записывается\n", diskno);
+                disk_close (disk);
+                return -1;
+        }
+        disk_close (disk);
+        printf ("Диск %d: признак архивного тома %s.\n", diskno,
+                strcmp (action, "on") == 0 ? "установлен (том закрыт для СЕРПа)" :
+                "снят (том открыт для обмена)");
+        return 0;
+}
+
+/*
+ * Паспорт тома (зона 0) - по образцу реальных томов АРФА 2095/2096.
+ * Номер тома записывается в двоично-десятичном виде (слова 0017, 0020,
+ * 0023). Байт 4 слова 0007 - признак архивного тома (см. выше).
+ */
+static void
+arfa_build_passport (unsigned char *data, unsigned diskno)
+{
+        unsigned bcd12 = (unsigned) (diskno / 1000 % 10) << 4 | diskno / 100 % 10;
+        unsigned bcd34 = (unsigned) (diskno / 10 % 10) << 4 | diskno % 10;
+
+        memset (data, 0, ZBYTES);
+        data [6*0000+3] = 0x08;                 /* код паспорта АРФЫ */
+        data [6*0000+4] = 0xaa; data [6*0000+5] = 0xa0;
+        data [6*0002+4] = 0x09; data [6*0002+5] = 0xaa;
+        data [6*0003+1] = 0x01;
+        data [6*0004+2] = 0xfa;
+        data [6*0006+0] = data [6*0006+1] = data [6*0006+2] = 0x99;
+        data [6*0006+5] = 0x99;
+        data [6*0007+2] = 0xee;
+        data [ARFA_PASS_BYTE] = ARFA_PASS_SET;  /* признак архивного тома */
+        /* свёртка паспорта - значение реального тома (не пересчитывается) */
+        data [6*0010+0] = 0x05; data [6*0010+1] = 0x7e; data [6*0010+2] = 0x40;
+        data [6*0010+3] = 0x01; data [6*0010+4] = 0x5f; data [6*0010+5] = 0x90;
+        data [6*0016+5] = 0x04;
+        data [6*0017+0] = bcd12; data [6*0017+1] = bcd34;
+        data [6*0017+2] = bcd12; data [6*0017+3] = bcd34;
+        data [6*0017+5] = 0x03;
+        data [6*0020+1] = 0x0f;
+        data [6*0020+4] = bcd12; data [6*0020+5] = bcd34;
+        data [6*0023+0] = bcd12;
+        data [6*0030+0] = 0x80;
+}
+
+/*
+ * Разметка тома АРФЫ: паспорт (зона 0) и пустой каталог в зонах
+ * 1, 011, 017, 020, 023. Паспорт записывается, только если зона 0
+ * пуста (том новый); том с данными в зоне 0 паспорта не получает.
+ * Уже размеченный том повторно не размечается. Возвращает 0 при успехе.
  */
 int
 arfa_format (unsigned diskno, const char *volabel)
 {
         void *disk;
-        unsigned char data [ZBYTES], gost [6];
+        unsigned char data [ZBYTES], gost [6], pass [ZBYTES];
         unsigned char *w, *p;
-        int z, n, ncopy, copies [16];
+        int z, n, ncopy, copies [16], write_pass;
 
         disk = disk_open (diskno, DISK_CREATE);
         if (! disk) {
@@ -447,6 +572,22 @@ arfa_format (unsigned diskno, const char *volabel)
                 fprintf (stderr, "). Повторная разметка запрещена;\n"
                         "обнулите зоны каталога командой "
                         "'besmtool zero %d --start=1 --length=023'.\n", diskno);
+                disk_close (disk);
+                return -1;
+        }
+
+        /* Паспорт тома пишем только на пустую зону 0 (нули или
+         * несуществующая зона; LOUD вернёт DISK_IO_NEW). */
+        write_pass = 1;
+        z = disk_readi (disk, 0, (char*) pass, NULL, NULL, DISK_MODE_LOUD);
+        if (z == DISK_IO_OK) {
+                for (z = 0; z < ZBYTES; ++z)
+                        if (pass [z]) {
+                                write_pass = 0;
+                                break;
+                        }
+        } else if (z != DISK_IO_NEW) {
+                fprintf (stderr, "Диск %d: зона 0 не читается\n", diskno);
                 disk_close (disk);
                 return -1;
         }
@@ -506,6 +647,23 @@ arfa_format (unsigned diskno, const char *volabel)
                         return -1;
                 }
         }
+        if (write_pass)
+                arfa_build_passport (pass, diskno);
+        else
+                fprintf (stderr, "Диск %d: зона 0 непуста, паспорт тома "
+                        "не записан, признак архивного тома не установлен\n",
+                        diskno);
+        if (write_pass) {
+                unsigned char convol [1024];
+                memset (convol, 1, sizeof (convol));    /* слова данных */
+                if (disk_writei (disk, 0, (char*) pass, (char*) convol,
+                                NULL, DISK_MODE_QUIET) != DISK_IO_OK) {
+                        fprintf (stderr, "Ошибка записи паспорта (зона 0) "
+                                "диска %d\n", diskno);
+                        disk_close (disk);
+                        return -1;
+                }
+        }
         disk_close (disk);
 
         printf ("Диск %d размечен как том АРФА.\n", diskno);
@@ -516,6 +674,9 @@ arfa_format (unsigned diskno, const char *volabel)
         for (z = 0; (unsigned) z < ARFA_NCOPIES; ++z)
                 printf (" %04o", arfa_copy_zones [z]);
         printf ("\n  Данные областей размещаются с зоны %04o.\n", ARFA_DATA_MIN);
+        if (write_pass)
+                printf ("  Паспорт тома записан в зону 0, признак архивного "
+                        "тома установлен (том невидим в СЕРПе).\n");
         return 0;
 }
 

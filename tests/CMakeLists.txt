@@ -6,6 +6,7 @@ add_test(NAME bemsh-standalone COMMAND Python3::Interpreter ../run-test.py WORKI
 add_test(NAME e63-time COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/e63-time)
 add_test(NAME arfa-e63 COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/arfa-e63)
 add_test(NAME arfa-io COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/arfa-io)
+add_test(NAME arfa-flag COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/arfa-flag)
 add_test(NAME pascal-arfa COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/pascal-arfa)
 add_test(NAME dtran COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/dtran)
 add_test(NAME edit COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/edit)

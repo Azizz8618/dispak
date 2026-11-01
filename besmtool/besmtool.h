@@ -6,6 +6,7 @@ void list_disk (unsigned diskno);
 void passports (unsigned diskno, unsigned start);
 void arfa_catalog (unsigned diskno);
 int arfa_format (unsigned diskno, const char *volabel);
+int arfa_flag_cmd (unsigned diskno, const char *action);
 int arfa_create (unsigned diskno, const char *name, unsigned start,
         unsigned nzones, unsigned attr, int special);
 int arfa_destroy (unsigned diskno, const char *name);

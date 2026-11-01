@@ -423,6 +423,7 @@ int e61 (void);
 int e62 (void);
 int e63 (void);
 int arfa_e63 (void);
+int arfa_area_unit (unsigned u);    /* лог.номер, к которому Э63 подключил область */
 
 /* arith.c */
 int add (void);

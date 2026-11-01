@@ -80,6 +80,7 @@ usage ()
         fprintf (stderr, "\tbesmtool pass [<disk-number>]\n");
         fprintf (stderr, "\tbesmtool arfa <disk-number>\n");
         fprintf (stderr, "\tbesmtool arfa-format <disk-number> [--label=<том>]\n");
+        fprintf (stderr, "\tbesmtool arfa-flag <disk-number> [on|off|query]\n");
         fprintf (stderr, "\tbesmtool arfa-create <disk-number> <имя> [--start=<zone>]"
                         " [--length=<nzones>] [--attr=XX] [--special]\n");
         fprintf (stderr, "\tbesmtool arfa-destroy <disk-number> <имя>\n");
@@ -112,6 +113,11 @@ usage ()
         fprintf (stderr, "\t--label=<том>      метка тома АРФЫ, до 6 символов (по умолчанию 001)\n");
         fprintf (stderr, "\t--attr=XX         атрибут зонового слова, 0x60..0x77 (по умолчанию 0x68)\n");
         fprintf (stderr, "\t--special         спецзапись (без файла данных)\n");
+        fprintf (stderr, "\n");
+        fprintf (stderr, "arfa-flag:\n");
+        fprintf (stderr, "\ton     занести признак архивного тома (Э50 0166, И15=0)\n");
+        fprintf (stderr, "\toff    уничтожить признак (И15=1); том открыт для Э70/СЕРПа\n");
+        fprintf (stderr, "\tquery  выдать признак (И15=2); без аргумента - тоже запрос\n");
         exit (-1);
 }
 
@@ -220,6 +226,11 @@ main (int argc, char **argv)
                                 return 1;
                         return 0;
                 }
+                if (strcmp ("arfa-flag", argv[0]) == 0) {
+                        if (arfa_flag_cmd (diskno, argc > 2 ? argv[2] : "query") < 0)
+                                return 1;
+                        return 0;
+                }
                 if (strcmp ("erase", argv[0]) == 0) {
                         erase_disk (diskno, start, length, 1);
                         return 0;
@@ -270,6 +281,11 @@ main (int argc, char **argv)
                 }
                 if (strcmp ("arfa-destroy", argv[0]) == 0) {
                         if (arfa_destroy (diskno, argv[2]) < 0)
+                                return 1;
+                        return 0;
+                }
+                if (strcmp ("arfa-flag", argv[0]) == 0) {
+                        if (arfa_flag_cmd (diskno, argv[2]) < 0)
                                 return 1;
                         return 0;
                 }

@@ -135,6 +135,18 @@ static arfa_area_t        areas [ARFA_MAX_AREAS];
 static int                nareas;
 static int                unit_area [64];        /* лог.номер -> индекс+1 */
 
+/*
+ * Лог.номер, к которому Э63 подключил ОБЛАСТЬ архива (дозаказ).
+ * Отличает санкционированный АРФОЙ доступ (обмен со сдвинутой
+ * областью) от прямого доступа к целому тому (Э50 0131 + Э70),
+ * закрытого признаком архивного тома.
+ */
+int
+arfa_area_unit (unsigned u)
+{
+        return u < 64 ? unit_area [u] : 0;
+}
+
 /* Найденный том архива. */
 static void              *arfa_disk;
 static unsigned           arfa_diskno;
