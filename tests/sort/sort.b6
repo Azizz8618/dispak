@@ -6,10 +6,8 @@
 inp$$$
 main start 1
  vtm '30000'(13)
- *66 is
- kk 0,'10'(8)
- *66 is        comment out this line
- kk 0,'10'(8)  and this one to make the test pass
+ *66 is        the duplicated *66/kk pair removed 2026-11: on the
+ kk 0,'10'(8)  current besm6.org disks it broke the run (README)
 printo extrd printo
  vtm res(14)
  its 14

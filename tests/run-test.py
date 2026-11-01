@@ -107,6 +107,9 @@ def match_line(line, pattern):
 
 #--------------------------------------------------------------
 # Compare the output with expected contents.
+# A hunk of the unified diff matches (and is dropped) if it has
+# an equal number of removed/added lines and every removed line
+# matches the corresponding added line as a wildcard pattern.
 #
 def process_wildcards(diff):
     # Convert the iterator into list.
@@ -119,19 +122,29 @@ def process_wildcards(diff):
         return lines
     lines = lines[2:]
 
-    # Process groups of three lines and match wildcards.
-    while len(lines) >= 3:
-        if lines[0][0] == '@' and \
-           lines[1][0] == '-' and \
-           lines[2][0] == '+' and \
-           match_line(lines[2][1:], lines[1][1:]):
-            # Match: remove these three lines.
-            lines = lines[3:]
+    result = []
+    i = 0
+    while i < len(lines):
+        if lines[i][0] != '@':
+            result.append(lines[i])
+            i += 1
+            continue
+        # Collect the whole hunk up to the next @@ header.
+        j = i + 1
+        while j < len(lines) and lines[j][0] != '@':
+            j += 1
+        hunk = lines[i:j]
+        removed = [l[1:] for l in hunk if l[0] == '-']
+        added   = [l[1:] for l in hunk if l[0] == '+']
+        if len(removed) == len(added) and \
+           all(match_line(p, m) for m, p in zip(removed, added)):
+            # Match: drop the whole hunk including the @@ line.
+            pass
         else:
-            # No match, return the rest.
-            return lines
+            result.extend(hunk)
+        i = j
 
-    return lines
+    return result
 
 #--------------------------------------------------------------
 #

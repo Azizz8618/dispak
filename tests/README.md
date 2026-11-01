@@ -46,3 +46,37 @@ This can be done by script:
 
     cd tests
     ./show-tests.py -u
+
+## Wildcards for host-dependent values
+
+The '#' symbol in 'output.txt' matches any character of the actual
+output line (see 'match_line' in run-test.py). Use it for values that
+depend on the host, otherwise the test fails every day:
+
+* current date in the listing header (bemsh-ms, forex, sort, ...):
+  write '##.##.##' instead of the date;
+* KIPS in whetstone depends on the host speed: replace all digits
+  after 'КIРS' with '#';
+* serp-ogl-2113: the year of ЗПУ/ЗПБ for the six oldest packages
+  (КЧ, ПРОРОК, СПОЭ67, КАЧКА, Э60, ПРИК5) is displayed depending on
+  the current date - write '##' for the year; the dates of the other
+  packages are stable;
+* a diff hunk with several changed lines matches as a whole when the
+  number of removed/added lines is equal and every removed line
+  matches the corresponding added line (run-test.py, 2026-11).
+
+## tests/sort
+
+The upstream deck (ee12f49, "Added test of E66 with the 'keep in
+memory' flag") contained a duplicated '*66 is' / 'kk 0,'10'(8)' pair
+with the author's own note "comment out this line ... to make the
+test pass".  The recorded output.txt corresponds to the deck WITHOUT
+that pair; with it the job abends (*53) on the current besm6.org
+disks.  The pair was removed on 2026-11 (see sort.b6); the first
+'*66/kk' pair still exercises Э66 with the 'keep in memory' flag.
+
+## tests/pascal-arfa
+
+The dates 'LIВRАRУ ОТ 29.10.26/30.10.26' in output.txt are the
+compilation dates of GOSTLIB modules baked into disk 2348 (see the
+besm-crypto project); they are stable as long as 2348 is not rebuilt.
