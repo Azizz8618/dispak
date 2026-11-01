@@ -5,6 +5,7 @@ add_test(NAME bemsh-ms COMMAND Python3::Interpreter ../run-test.py WORKING_DIREC
 add_test(NAME bemsh-standalone COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/bemsh-standalone)
 add_test(NAME e63-time COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/e63-time)
 add_test(NAME arfa-e63 COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/arfa-e63)
+add_test(NAME arfa-io COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/arfa-io)
 add_test(NAME dtran COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/dtran)
 add_test(NAME edit COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/edit)
 add_test(NAME forex COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/forex)
