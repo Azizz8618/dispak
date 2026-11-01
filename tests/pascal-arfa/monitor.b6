@@ -1,0 +1,331 @@
+шифр 419999 зс5^
+вре 300^
+лен 40(2348)^
+лен 41(2196)^
+eeв1а3
+*name
+*call yesmemory
+*perso:402030
+*perso:402560,cont
+*stand
+*call *pascal
+program monitor(output, input);(*=y+,s7*)
+(* МОНИТОР ЗАШИФРОВАННЫХ ОБЛАСТЕЙ АРХИВА АРФА.
+   Команды с карты ввода:
+     C ном длн - создать область (имя из таблицы)
+     W ном слв - зашифровать образец и записать в зону 0
+     R ном слв - считать зону 0, расшифровать, печать, сверка
+     I ном     - сведения об области (Э63 07)
+     D ном     - уничтожить область (Э63 02)
+     E         - конец работы
+   Экстракоды: Э63 (КЛЮЧАР) - управление областями архива,
+   Э70 - обмен зонами, ГОСТ 28147-89 - библиотека GOSTLIB.
+   Слова ответов Э63 снимаются на СМ и М16; для канонической
+   целой формы Паскаля они проходят через поля записей. *)
+type
+  w2 = packed record l, r: 0..16777215 end;
+  tword = packed record case integer of
+    1: (a: alfa);
+    2: (l, r: 0..16777215)
+  end;
+  W8 = array [1..8] of integer;
+  S16 = array [1..16] of integer;
+  CtxT = record
+    roundkey: array [1..32] of integer;
+    sbox: array [1..8] of array [0..15] of integer
+  end;
+  PtrW = @integer;
+var
+  isw: array [1..8] of w2;
+  kl, prmw, ks, answerw, tmpw: w2;
+  code, unitn, i, k, nom, len: integer;
+  cmd: char;
+  ok: boolean;
+  pa, pb: @alfa;
+  pw, pw2: @integer;
+  msg, msg2: array [1..11] of tword;
+  key: W8;
+  s1, s2, s3, s4, s5, s6, s7, s8: S16;
+  ctx: CtxT;
+procedure GOSTINIT(var c2: CtxT; k2: W8;
+  a8: S16; a7: S16; a6: S16; a5: S16;
+  a4: S16; a3: S16; a2: S16; a1: S16); external;
+procedure ENCCTR(c2: CtxT; txt: PtrW; r2: PtrW;
+  l2: integer; iv: integer); external;
+procedure DECCTR(c2: CtxT; ct2: PtrW; r2: PtrW;
+  l2: integer); external;
+
+procedure e63;
+(* Э63 без параметров на РМР; ИС - в isw[] *)
+var pi: @w2;
+begin
+  pi := ref(isw[1]);
+  besm(400006B);
+  tmpw := kl;
+  besm(30630000B);
+  answerw := ;
+  besm(420016B);
+  tmpw := ;
+  code := tmpw.r
+end;
+
+procedure e63p;
+(* Э63 с параметром на РМР; РМР - из prmw *)
+var pi: @w2;
+begin
+  pi := ref(prmw);
+  besm(400005B);
+  tmpw := prmw;
+  besm(24120000B);
+  pi := ref(isw[1]);
+  besm(400006B);
+  tmpw := kl;
+  besm(30630000B);
+  answerw := ;
+  besm(420016B);
+  tmpw := ;
+  code := tmpw.r
+end;
+
+procedure exch(readf, page, zone: integer);
+(* Э70: обмен целой зоной с лог.номером unitn *)
+var pi: @w2;
+begin
+  ks.l := readf * 4096 + page * 64;
+  ks.r := unitn * 4096 + zone;
+  pi := ref(ks);
+  besm(400005B);
+  besm(24700000B);
+end;
+
+procedure setname(n: integer);
+(* имя области по-старому: 9 букв ГОСТ + шифр хозяина *)
+begin
+  if n = 1 then begin
+    isw[2].l := 14422452B; isw[2].r := 14231017B
+  end else if n = 2 then begin
+    isw[2].l := 14222452B; isw[2].r := 14022462B
+  end else if n = 3 then begin
+    isw[2].l := 10030065B; isw[2].r := 12021017B
+  end else begin
+    isw[2].l := 13420453B; isw[2].r := 10030462B
+  end;
+  isw[3].l := 3607417B;
+  isw[3].r := 1464237B
+end;
+
+procedure order(n: integer);
+(* Э63 12: дозаказ области на свободный лог.номер *)
+begin
+  setname(n);
+  isw[1].l := 12000000B; isw[1].r := 1;
+  prmw.l := 77600000B; prmw.r := 0;
+  e63p;
+  unitn := answerw.r
+end;
+
+procedure mkarea(n, ln: integer);
+begin
+  setname(n);
+  isw[1].l := 1000000B; isw[1].r := 1;
+  prmw.l := 0; prmw.r := ln;
+  e63p;
+  if code = 0 then
+    writeln('ОБЛАСТЬ ', n, ' СОЗДАНА, ЗОН=', ln)
+  else
+    writeln('ОБЛАСТЬ ', n, ' НЕ СОЗДАНА, КОД=', code)
+end;
+
+procedure wrarea(n, nw: integer);
+begin
+  order(n);
+  writeln('ДОЗАКАЗ ОБЛАСТИ ', n, ': КОД=', code, ' ЛУ=', unitn);
+  if code <> 0 then
+    writeln('НЕТ ЛОГ.НОМЕРА, ЗАПИСЬ ПРОПУЩЕНА')
+  else begin
+    for i := 1 to nw do begin
+      k := 2 * i - 1;
+      pw := ptr(8191 + k);
+      pw@ := msg[i].l;
+      pw := ptr(8191 + k + 1);
+      pw@ := msg[i].r
+    end;
+    writeln('ШИФРУЮ ', nw, ' СЛОВ...');
+    encctr(ctx, ptr(8192), ptr(9216), 2 * nw, 777);
+    writeln('ШИФРОВАНИЕ ЗАВЕРШЕНО');
+    pa := ptr(8192);
+    pb := ptr(9217);
+    if pa@ = pb@ then
+      writeln('ОШИБКА: ШИФРОГРАММА СОВПАДАЕТ С ТЕКСТОМ')
+    else
+      writeln('ТЕКСТ ЗАШИФРОВАН ГОСТ 28147-89');
+    pw2 := ptr(9216);
+    write('НАЧАЛО ШИФРОГРАММЫ: ', pw2@);
+    pw2 := ptr(9217);
+    writeln(' ', pw2@);
+    exch(0, 9, 0);
+    writeln('ЗАПИСАНО В ЗОНУ 0 ОБЛАСТИ ', n)
+  end
+end;
+
+procedure rdarea(n, nw: integer);
+begin
+  order(n);
+  writeln('ДОЗАКАЗ ОБЛАСТИ ', n, ': КОД=', code, ' ЛУ=', unitn);
+  if code <> 0 then
+    writeln('НЕТ ЛОГ.НОМЕРА, ЧТЕНИЕ ПРОПУЩЕНО')
+  else begin
+    writeln('ЧИТАЮ ЗОНУ 0...');
+    exch(8, 10, 0);
+    writeln('ЗОНА ПРОЧИТАНА');
+    decctr(ctx, ptr(10240), ptr(11264), 2 * nw);
+    writeln('ДЕШИФРОВАНИЕ ЗАВЕРШЕНО');
+    for i := 1 to nw do begin
+      k := 2 * i - 1;
+      pw := ptr(11263 + k);
+      msg2[i].l := pw@;
+      pw := ptr(11263 + k + 1);
+      msg2[i].r := pw@
+    end;
+    write('РАСШИФРОВАНО: ');
+    for i := 1 to nw do
+      write(msg2[i].a);
+    writeln;
+    ok := true;
+    for i := 1 to nw do
+      if msg[i].a <> msg2[i].a then ok := false;
+    if ok then
+      writeln('СВЕРКА: ТЕКСТ ВОССТАНОВЛЕН ВЕРНО')
+    else
+      writeln('СВЕРКА: РАСХОЖДЕНИЕ ТЕКСТА')
+  end
+end;
+
+procedure inarea(n: integer);
+begin
+  setname(n);
+  isw[1].l := 7000000B; isw[1].r := 1;
+  e63;
+  if code = 0 then
+    writeln('ОБЛАСТЬ ', n, ': ХОЗЯИН=', answerw.l,
+      ' ЗОН=', answerw.r mod 65536)
+  else
+    writeln('ОБЛАСТЬ ', n, ': СВЕДЕНИЙ НЕТ, КОД=', code)
+end;
+
+procedure dlarea(n: integer);
+begin
+  setname(n);
+  isw[1].l := 2000000B; isw[1].r := 1;
+  e63;
+  writeln('УНИЧТОЖЕНИЕ ОБЛАСТИ ', n, ': КОД=', code);
+  isw[1].l := 7000000B; isw[1].r := 1;
+  e63;
+  if code = 1 then
+    writeln('ПРОВЕРКА: ОБЛАСТИ БОЛЬШЕ НЕТ')
+  else
+    writeln('ПРОВЕРКА: КОД=', code)
+end;
+
+begin
+  writeln('МОНИТОР ЗАШИФРОВАННЫХ ОБЛАСТЕЙ АРХИВА АРФА ОС ДИСПАК');
+  writeln('СОЗДАНИЕ, ЗАПИСЬ, ЧТЕНИЕ И УНИЧТОЖЕНИЕ: Э63 + Э70 + ГОСТ');
+
+  s1[1] := 1; s1[2] := 7; s1[3] := 14; s1[4] := 13;
+  s1[5] := 0; s1[6] := 5; s1[7] := 8; s1[8] := 3;
+  s1[9] := 4; s1[10] := 15; s1[11] := 10; s1[12] := 6;
+  s1[13] := 9; s1[14] := 12; s1[15] := 11; s1[16] := 2;
+  s2[1] := 8; s2[2] := 14; s2[3] := 2; s2[4] := 5;
+  s2[5] := 6; s2[6] := 9; s2[7] := 1; s2[8] := 12;
+  s2[9] := 15; s2[10] := 4; s2[11] := 11; s2[12] := 0;
+  s2[13] := 13; s2[14] := 10; s2[15] := 3; s2[16] := 7;
+  s3[1] := 5; s3[2] := 13; s3[3] := 15; s3[4] := 6;
+  s3[5] := 9; s3[6] := 2; s3[7] := 12; s3[8] := 10;
+  s3[9] := 11; s3[10] := 7; s3[11] := 8; s3[12] := 1;
+  s3[13] := 4; s3[14] := 3; s3[15] := 14; s3[16] := 0;
+  s4[1] := 7; s4[2] := 15; s4[3] := 5; s4[4] := 10;
+  s4[5] := 8; s4[6] := 1; s4[7] := 6; s4[8] := 13;
+  s4[9] := 0; s4[10] := 9; s4[11] := 3; s4[12] := 14;
+  s4[13] := 11; s4[14] := 4; s4[15] := 2; s4[16] := 12;
+  s5[1] := 12; s5[2] := 8; s5[3] := 2; s5[4] := 1;
+  s5[5] := 13; s5[6] := 4; s5[7] := 15; s5[8] := 6;
+  s5[9] := 7; s5[10] := 0; s5[11] := 10; s5[12] := 5;
+  s5[13] := 3; s5[14] := 14; s5[15] := 9; s5[16] := 11;
+  s6[1] := 11; s6[2] := 3; s6[3] := 5; s6[4] := 8;
+  s6[5] := 2; s6[6] := 15; s6[7] := 10; s6[8] := 13;
+  s6[9] := 14; s6[10] := 1; s6[11] := 7; s6[12] := 4;
+  s6[13] := 12; s6[14] := 9; s6[15] := 6; s6[16] := 0;
+  s7[1] := 6; s7[2] := 8; s7[3] := 2; s7[4] := 3;
+  s7[5] := 9; s7[6] := 10; s7[7] := 5; s7[8] := 12;
+  s7[9] := 1; s7[10] := 14; s7[11] := 4; s7[12] := 7;
+  s7[13] := 11; s7[14] := 13; s7[15] := 0; s7[16] := 15;
+  s8[1] := 12; s8[2] := 4; s8[3] := 6; s8[4] := 2;
+  s8[5] := 10; s8[6] := 5; s8[7] := 11; s8[8] := 9;
+  s8[9] := 14; s8[10] := 8; s8[11] := 13; s8[12] := 7;
+  s8[13] := 0; s8[14] := 3; s8[15] := 15; s8[16] := 1;
+  key[1] := 4293844428;
+  key[2] := 3148519816;
+  key[3] := 2003195204;
+  key[4] := 857870592;
+  key[5] := 4042388211;
+  key[6] := 4109760247;
+  key[7] := 4177132283;
+  key[8] := 4244504319;
+  gostinit(ctx, key, s8, s7, s6, s5, s4, s3, s2, s1);
+
+  kl.l := 52053075B;
+  kl.r := 67040060B;
+  msg[1].a := 'СЕКРЕТ';
+  msg[2].a := 'НЫЙ ТЕ';
+  msg[3].a := 'КСТ ДЛ';
+  msg[4].a := 'Я ЗАПИ';
+  msg[5].a := 'СИ В З';
+  msg[6].a := 'АШИФРО';
+  msg[7].a := 'ВАННУЮ';
+  msg[8].a := ' ОБЛАС';
+  msg[9].a := 'ТЬ АРХ';
+  msg[10].a := 'ИВА АР';
+  msg[11].a := 'ФА.   ';
+
+  cmd := ' ';
+  repeat
+    read(cmd);
+    if cmd = 'C' then begin
+      read(nom, len); readln;
+      mkarea(nom, len)
+    end else if cmd = 'W' then begin
+      read(nom, len); readln;
+      wrarea(nom, len)
+    end else if cmd = 'R' then begin
+      read(nom, len); readln;
+      rdarea(nom, len)
+    end else if cmd = 'I' then begin
+      read(nom); readln;
+      inarea(nom)
+    end else if cmd = 'D' then begin
+      read(nom); readln;
+      dlarea(nom)
+    end
+  until cmd = 'E';
+  writeln('КОНЕЦ РАБОТЫ МОНИТОРА')
+end.
+*perso:402000,cont
+*execute
+D 1
+D 2
+C 1 2
+C 2 4
+I 1
+W 1 6
+R 1 6
+W 2 4
+R 2 4
+I 2
+D 2
+I 2
+D 1
+I 1
+E
+*end file
+``````
+ЕКОНЕЦ

@@ -1337,10 +1337,15 @@ arfa_e63 (void)
 
         LOAD (is, isaddr);
         prm = accex;                        /* РМР */
-        if (getenv ("BESM6_ARFA_DEBUG"))
+        if (getenv ("BESM6_ARFA_DEBUG")) {
+                alureg_t w1, w2;
+                LOAD (w1, ADDR (isaddr + 1));
+                LOAD (w2, ADDR (isaddr + 2));
                 fprintf (stderr, "АРФА: АИСП=%o ИС=%o_%o РМР=%o_%o "
-                        "областей=%d\n", isaddr, is.l, is.r,
-                        prm.l, prm.r, nareas);
+                        "областей=%d ИМЯ1=%o_%o ИМЯ2=%o_%o\n", isaddr,
+                        is.l, is.r, prm.l, prm.r, nareas,
+                        w1.l, w1.r, w2.l, w2.r);
+        }
 
         switch (W48_43 (is)) {
         case 01:    code = op_create (is, isaddr, prm); break;

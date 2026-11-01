@@ -1,0 +1,3 @@
+--path=.:../../build/dispak
+-p
+monitor.b6
