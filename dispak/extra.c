@@ -1639,8 +1639,10 @@ e50(void)
                         /* pretend that the disks are 29.5 Mb */
                         acc.r = 1;
                 else
-                        /* BESM-6 tape */
-                        acc.r = 040;
+                        /* BESM-6 tape, type code 41 decimal (051 octal) -
+                         * as returned by the real ДИСПАК monitor; the golden
+                         * GOST program checks tip=41 for "лента типа БЭСМ" */
+                        acc.r = 051;
                 return E_SUCCESS;
         }
         case 0157:      /* request volume in exclusive ownership, with answer code */
