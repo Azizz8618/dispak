@@ -48,6 +48,32 @@ def get_app_path(app_name, relative_path):
     return app_name
 
 #--------------------------------------------------------------
+# Provision local disk images listed in the optional "disks.txt"
+# file (one disk number per line).  Every image is copied (or
+# unpacked from .xz) from the "../disks" directory, so that each
+# test run starts from a pristine volume and the working copies
+# never accumulate state between runs.  The working copies are
+# gitignored (tests/*/NNNN).
+#
+def provision_disks():
+    if not os.path.isfile("disks.txt"):
+        return
+    with open("disks.txt", 'r') as file:
+        names = [s.strip() for s in file if s.strip()]
+    import lzma, shutil
+    for name in names:
+        packed = os.path.join("..", "disks", name + ".xz")
+        plain = os.path.join("..", "disks", name)
+        if os.path.isfile(packed):
+            with lzma.open(packed) as src, open(name, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        elif os.path.isfile(plain):
+            shutil.copyfile(plain, name)
+        else:
+            print(f"FATAL: Cannot find disk {name} in tests/disks")
+            sys.exit(-1)
+
+#--------------------------------------------------------------
 # Get options from file.
 #
 def get_options(file_name):
@@ -155,6 +181,8 @@ if arg.verbosity:
 options = get_options("options.txt")
 if arg.verbosity:
     print("Options:", options)
+
+provision_disks()
 
 run_test(application_path, options, "output.run")
 

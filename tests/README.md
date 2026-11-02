@@ -65,6 +65,29 @@ depend on the host, otherwise the test fails every day:
   number of removed/added lines is equal and every removed line
   matches the corresponding added line (run-test.py, 2026-11).
 
+## Local disk volumes (tests/disks)
+
+If a test needs a writable disk volume, do NOT commit a per-test copy
+of the image: the job would dirty the tracked file on every run and
+the copies would diverge.  Instead:
+
+* put the pristine image into `tests/disks/` (large volumes may be
+  stored xz-compressed as `tests/disks/<NNNN>.xz`, e.g. `2348.xz`);
+* list the disk number in `tests/<name>/disks.txt`, one per line;
+* `run-test.py` unpacks/copies a fresh working copy into the test
+  directory before each run, so every run starts from the pristine
+  state; the working copies are gitignored (`tests/*/NNNN`).
+
+Current volumes:
+
+* `2196` - scratch АРФА volume for arfa-e63, arfa-io, arfalib,
+  pascal-arfa;
+* `2296` - small АРФА volume with the archive flag set (Э50 0166)
+  for arfa-flag;
+* `2348.xz` - system volume with GOSTLIB in zone 02560, the pasred
+  reader from the pascal-re project and the ARFALIB library in zone
+  02570 (deliverable image of the besm-crypto project).
+
 ## tests/sort
 
 The upstream deck (ee12f49, "Added test of E66 with the 'keep in

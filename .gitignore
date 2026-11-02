@@ -7,3 +7,7 @@ logs/
 debug*.txt
 dispak/config.h
 tests/*/2348
+tests/*/2196
+tests/*/2296
+!tests/disks/2196
+!tests/disks/2296
