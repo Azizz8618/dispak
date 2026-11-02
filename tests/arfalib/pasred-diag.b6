@@ -1,0 +1,34 @@
+шифр 419999 зс5^
+лен 40(2348)^
+ОЗУ 32^
+АЦПУ 140^
+ТРА 37^
+ТЕЛЕ^
+eeв1а3
+*name
+*call yesmemory
+*perso:402570
+*stand
+*call *pascal
+(*=s8*)program t(output);
+type arg=record
+  buflen, inplen: integer;
+  dummy1, dummy2: integer;
+  a: packed array[1..140] of char
+  end;
+var buf: arg; i: integer;
+procedure pasred(var data:arg); external;
+begin
+  writeln('ЛИТЕРАЛЫ: !=', ord('!'), ' K=', ord('к'), ' H=', ord('н'),
+    ' C=', ord('ц'), ' HELLO-H=', ord('h'));
+  buf.buflen := 140; buf.inplen := 0;
+  writeln;
+  pasred(buf);
+  writeln(' СЧИТАНО ', buf.inplen, ' ЗНАКОВ');
+  for i := 1 to buf.inplen do
+    writeln(i:3, ' КОД=', ord(buf.a[i]))
+end.
+*execute
+*end file
+``````
+ЕКОНЕЦ
