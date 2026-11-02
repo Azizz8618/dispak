@@ -177,6 +177,34 @@ usage ()
 	fprintf (stderr, _("  --bootstrap            used to generate contents of the system disk\n"));
 	fprintf (stderr, _("  --no-insn-check        all words but at addr 0 are treated as insns\n"));
 	fprintf (stderr, _("  --drum-dump=file       output drum 27 to file\n"));
+	fprintf (stderr, "\n");
+	fprintf (stderr, "Новые функции этой версии:\n");
+	fprintf (stderr, "  Э63 'КЛЮЧАР'  архивная система АРФА ОС ДИСПАК: управление\n");
+	fprintf (stderr, "                областями архива (константа 'КЛЮЧАР' на СМ,\n");
+	fprintf (stderr, "                адрес информационных слов в АИСП):\n");
+	fprintf (stderr, "                  01 создание области              10В запрос каталога\n");
+	fprintf (stderr, "                  02 уничтожение области            11В каталог общих\n");
+	fprintf (stderr, "                  03 пароль области                 12В дозаказ области\n");
+	fprintf (stderr, "                  04 задание прав доступа           13В имя и идентификатор\n");
+	fprintf (stderr, "                  05 подтверждение пароля           14В установка сдвига\n");
+	fprintf (stderr, "                  06 список допущенных лиц          15В запрос сдвига\n");
+	fprintf (stderr, "                  07 сведения об области            16В режим администратора\n");
+	fprintf (stderr, "                                                     17В смена шифра и ключа\n");
+	fprintf (stderr, "                  30В захват области                31В освобождение области\n");
+	fprintf (stderr, "  Э63 001       печать времени счёта задачи (ВРЕМЯ СЧЕТА: ЧЧ.ММ.СС)\n");
+	fprintf (stderr, "  Э63 2 и 3     ограничение времени решения задачи и резерв\n");
+	fprintf (stderr, "                времени на обработку авоста\n");
+	fprintf (stderr, "  Э50 0166      признак архивного тома: том невидим в СЕРПе и\n");
+	fprintf (stderr, "                закрыт для обмена Э70, кроме областей,\n");
+	fprintf (stderr, "                подключённых Э63 (И15: 0 занести, 1 снять, 2 выдать)\n");
+	fprintf (stderr, "  Том АРФЫ отыскивается по переменной среды BESM6_ARFA (номер\n");
+	fprintf (stderr, "  тома) либо по метке \"АRFA\" в каталоге тома. Разметка тома и\n");
+	fprintf (stderr, "  создание/уничтожение областей - командами besmtool arfa-format,\n");
+	fprintf (stderr, "  arfa-create, arfa-destroy, arfa-flag (справка: besmtool --help).\n");
+	fprintf (stderr, "  Библиотека Паскаля ARFALIB (том 2348, зона 02570, рядом с\n");
+	fprintf (stderr, "  GOSTLIB): внешние процедуры ARFACRE, ARFAWRE, ARFARDD, ARFADEL -\n");
+	fprintf (stderr, "  создание, запись с шифрованием, чтение с расшифрованием и\n");
+	fprintf (stderr, "  уничтожение зашифрованных областей архива из программ на Паскале.\n");
 
 	exit (1);
 }
