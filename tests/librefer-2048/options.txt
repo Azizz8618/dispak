@@ -1,1 +1,2 @@
+--path=../../build/dispak
 librefer-2048.b6

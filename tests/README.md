@@ -88,6 +88,28 @@ Current volumes:
   reader from the pascal-re project and the ARFALIB library in zone
   02570 (deliverable image of the besm-crypto project).
 
+## System-disk dependent tests (librefer-2048, librefer-2053, stat)
+
+The output of these tests is defined by the CONTENT of the system
+volumes (monitor and supervisor banners, library listings, zone
+statistics), not only by the deck.  When the disks are taken from
+the installed set (~/.besm6 or /usr/local/share/besm6) or from
+$BESM6_PATH, a stale image makes the test fail forever - the
+recorded etalons match the CURRENT images from besm6.org.
+
+Therefore these tests run with `--path=../../build/dispak`, i.e.
+against the volumes downloaded by cmake during the build (2048,
+2053, 2099) - exactly the images the etalons were recorded
+against.  The option overrides both $BESM6_PATH and the default
+install path, so the tests are independent of the host
+environment.  The disks are not modified by the decks, so the
+build directory volumes stay pristine.
+
+The remaining disk-dependent tests (librefer-2113/2148/2248,
+serp-*) still use the installed volumes (their disks are not
+fetched by the build); if besm6.org ever updates those images,
+re-record the etalons or pin the volumes in tests/disks/.
+
 ## tests/sort
 
 The upstream deck (ee12f49, "Added test of E66 with the 'keep in

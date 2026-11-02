@@ -1,1 +1,2 @@
+--path=../../build/dispak
 stat.b6
