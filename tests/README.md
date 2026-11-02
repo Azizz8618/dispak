@@ -105,6 +105,22 @@ install path, so the tests are independent of the host
 environment.  The disks are not modified by the decks, so the
 build directory volumes stay pristine.
 
+CAVEAT: the cmake rules download a volume only when it does not
+exist in the build directory yet.  When besm6.org updates its
+images (sbor2048.bin and sbor2053.bin were both refreshed on
+2026-10-23: 2048 gained the NEWTAR/PASSFORM/ISO/GOST crypto
+libraries, 2053 got a different zone statistics history), an OLD
+build directory keeps the pre-update volumes and these three
+tests fail forever against the current etalons.  Do NOT re-record
+the etalons against the stale volumes - refresh the volumes
+instead:
+
+    rm build/dispak/2048 build/dispak/2053 build/dispak/2099
+    make -C build
+
+(the same applies to the other fetched volumes 2063, 2086, 2113,
+2148, 2153, 2248, 4001 if their etalons ever start failing).
+
 The remaining disk-dependent tests (librefer-2113/2148/2248,
 serp-*) still use the installed volumes (their disks are not
 fetched by the build); if besm6.org ever updates those images,
