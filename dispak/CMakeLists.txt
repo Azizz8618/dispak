@@ -109,24 +109,22 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/2099
 #
 # Build disks 2053, 2048, 2248.
 #
+# Volume policy: the image is taken from $BESM6_PATH (colon search list,
+# first hit), then from the install share (${DISKDIR}); downloading from
+# besm6.org is opt-in via BESM6_FETCH_DISKS=1.  See fetch_disk.sh.
+#
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/2053
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Creating 2053"
-    COMMAND if [ -e "${DISKDIR}/2053" ]\;
-        then cp -a -L "${DISKDIR}/2053" .\;
-        else wget -nv -O 2053 ${ARCHIVE}/sbor2053.bin\; fi
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/fetch_disk.sh 2053 sbor2053.bin "${DISKDIR}" ${ARCHIVE}
 )
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/2048
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Creating 2048"
-    COMMAND if [ -e "${DISKDIR}/2048" ]\;
-        then cp -a -L "${DISKDIR}/2048" .\;
-        else wget -nv -O 2048 ${ARCHIVE}/sbor2048.bin\; fi
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/fetch_disk.sh 2048 sbor2048.bin "${DISKDIR}" ${ARCHIVE}
 )
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/2248
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Creating 2248"
-    COMMAND if [ -e "${DISKDIR}/2248" ]\;
-        then cp -a -L "${DISKDIR}/2248" .\;
-        else wget -nv -O 2248 ${ARCHIVE}/alt2048.bin\; fi
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/fetch_disk.sh 2248 alt2048.bin "${DISKDIR}" ${ARCHIVE}
 )
