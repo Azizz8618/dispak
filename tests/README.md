@@ -118,6 +118,15 @@ instead:
     rm build/dispak/2048 build/dispak/2053 build/dispak/2099
     make -C build
 
+In this fork the download is not a silent fallback.  By default the
+build takes the volumes from $BESM6_PATH (colon search list, first
+hit) and then from the install share; a besm6.org download happens
+only with BESM6_FETCH_DISKS=1, which also forces a fresh copy over
+an existing local one (dispak/fetch_disk.sh):
+
+    rm build/dispak/2048 build/dispak/2053 build/dispak/2099
+    BESM6_FETCH_DISKS=1 make -C build
+
 (the same applies to the other fetched volumes 2063, 2086, 2113,
 2148, 2153, 2248, 4001 if their etalons ever start failing).
 
