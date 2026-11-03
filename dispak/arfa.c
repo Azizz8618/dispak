@@ -670,7 +670,7 @@ resolve_area (alureg_t is, ushort isaddr)
         }
         if (W4_1 (is) == 014)                      /* МС-80 не поддержан */
                 return -2;
-        if (W4_1 (is) > 7)
+        if (W4_1 (is) > 010)                       /* 011-017 недопустимы */
                 return -2;
         if (W4_1 (is) == 010) {
                 if (parse_name_new (isaddr, name, &len, &schifr) < 0)
