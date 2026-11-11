@@ -2,6 +2,12 @@ add_test(NAME algol-besm6 COMMAND Python3::Interpreter ../run-test.py WORKING_DI
 add_test(NAME algol-gdr COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/algol-gdr)
 add_test(NAME autocode-itm COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/autocode-itm)
 add_test(NAME bemsh-ms COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/bemsh-ms)
+add_test(NAME stdin-eof
+    COMMAND Python3::Interpreter
+        ${CMAKE_SOURCE_DIR}/tests/stdin-eof.py
+        $<TARGET_FILE:dispak>
+        ${CMAKE_BINARY_DIR}/dispak
+        ${CMAKE_SOURCE_DIR}/tests/bemsh-ms/bemsh.b6)
 add_test(NAME bemsh-standalone COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/bemsh-standalone)
 add_test(NAME e63-time COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/e63-time)
 add_test(NAME arfa-e63 COMMAND Python3::Interpreter ../run-test.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/arfa-e63)

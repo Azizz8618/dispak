@@ -23,6 +23,19 @@
 #include "gost10859.h"
 #include "encoding.h"
 
+#define SMALL_DISKS()   (getenv("BESM6_SMALL_DISKS") || disk_emulate_725)
+
+/* Отладочная трасса этапа 1 проекта ГЛИССАДА-6: дампы Э70/дд_обмена
+ * в stderr.  Включается переменной окружения BESM6_DD_DEBUG. */
+static int
+dd_debug (void)
+{
+    static int v = -1;
+    if (v < 0)
+        v = getenv ("BESM6_DD_DEBUG") != NULL;
+    return v;
+}
+
 #define IS_DIGIT(c)     (c >= '0' && c <= '9')
 #define IS_CHAR(c)      ((c >= 0101 && c <= 0132) || \
                          (c >= 0140 && c <= 0176))
@@ -1545,13 +1558,13 @@ e50(void)
                  * in chunks of 040 blocks for disks
                  */
                 disks[unit].offset =
-                        (getenv("BESM6_SMALL_DISKS") || disks[unit].diskno < 2048 ? acc.r : acc.r << 5) & 07777;
+                        (SMALL_DISKS() || disks[unit].diskno < 2048 ? acc.r : acc.r << 5) & 07777;
                 return E_SUCCESS;
         }
         case 0113: {    /* get current offset */
                 uint unit = (acc.r >> 12) & 077;
                 acc.l = disks[unit].offset;
-                if (disks[unit].diskno >= 2048 && !getenv("BESM6_SMALL_DISKS"))
+                if (disks[unit].diskno >= 2048 && !SMALL_DISKS())
                         acc.l >>= 5;
                 acc.r = 0;
                 return E_SUCCESS;
@@ -1571,10 +1584,8 @@ e50(void)
                         1;
                 return E_SUCCESS;
         }
-        case 0115:      /* grab a dataset (batch mode: always succeeds) */
+        case 0115: case 0116:   /* grab/release a volume */
                 return E_SUCCESS;
-        case 0116:      /* release a dataset from exclusive ownership */
-                return e50_116();
         case 0121:              /* specify volume password */
                 return E_SUCCESS;
         case 0127:              /* query presence of passwords */
@@ -1630,6 +1641,7 @@ e50(void)
                 return E_SUCCESS;
         case 0137:      /* undocumented */
                 return E_SUCCESS;
+
         case 0156: { /* get volume type */
                 int i = disks[(acc.r >> 12) & 077].diskno;
                 acc.l = 0;
@@ -1683,6 +1695,8 @@ e50(void)
                         disk_close(h);
                 } else acc.r = 0;
         }        return E_SUCCESS;
+        case 01207:
+                return E_SUCCESS;
         case 01211:     /* plotter output (64 words starting from the address on acc) */
                if (reg[3] == 071717) {
                 static FILE * plot = NULL;
@@ -1772,6 +1786,12 @@ e62(void)
                 acc.l = 0;
                 acc.r = 040000000;
                 return E_SUCCESS;
+        case 0057:      /* acquire a terminal by number */
+                if (dd_debug ())
+                        fprintf(stderr, "Acquiring terminal %08o %08o\n", acc.l, acc.r);
+                acc.l = 0;
+                acc.r = 077777;
+                return E_SUCCESS;
         case 0076:      /* drop incognito */
                 return E_SUCCESS;
         case 0102:      /* stop reading from terminal */
@@ -1790,6 +1810,11 @@ e62(void)
                 e = ddio();
                 STORE(r, 1);
                 return e;
+        case 0131:      /* system volume information */
+                acc.l = 2;
+                acc.r = (5<<8)+3;
+                accex = acc;
+                return E_SUCCESS;
         default:        /* set volume offset or close volume */
                 u = reg[016] >> 9;
                 if ((u >= 030) && (u < 070)) {
@@ -1865,6 +1890,37 @@ e63_set_limit (int t, int reserve)
         }
         e63_limit_set = 1;
         e63_limit = reserve ? 3600.0 - t : now + t;
+}
+
+int
+arfa(void)
+{
+    int addr = reg[016];
+    alureg_t arg;
+    LOAD(arg, addr);
+    reg[016] = 0;
+    switch (arg.l >> 18) {
+    case 016:                   /* admin password confirmation */
+        break;
+    case 065: {                 /* reading main archive volume */
+        void * h;
+        int page, zone, r;
+        h = disk_open(2248, DISK_READ_ONLY);
+        if (!h) {
+            if (dd_debug ())
+                fprintf(stderr, "No archive volume 2248\n");
+            return E_UNIMP;
+        }
+        page = (arg.l >> 6) & 037;
+        zone = arg.r & 07777;
+        r = disk_readi(h, zone, (char *)(core + page*02000), (char *)convol + (page*02000), NULL, DISK_MODE_QUIET);
+        disk_close(h);
+        return r == DISK_IO_OK ? E_SUCCESS : E_DISKERR;
+    } break;
+    default:
+        return E_UNIMP;
+    }
+    return E_SUCCESS;
 }
 
 int
@@ -2037,6 +2093,36 @@ ddio(void)
                 zone = uir.i_addr & 07777;  // зона диска
 
         ddisk_t * dd = disks + u;
+        if (dd_debug ())
+        {   /* отладка этапа 1: каждое УС Э70 с расшифровкой */
+            static int dumped45 = 0;
+            fprintf (stderr, "DD pc=%05o%c r016=%05o u=%02o z=%04o %s "
+                     "uil=%o/%o/%o uir=%o/%o/%o\n",
+                     pc, right ? 'R' : 'L', reg[016], u, zone,
+                     (uil.i_reg & 8) ? "SEC" : (uil.i_opcode & 010) ? "RD" : "WR",
+                     uil.i_opcode, uil.i_reg, uil.i_addr,
+                     uir.i_opcode, uir.i_reg, uir.i_addr);
+            if (u == 045 && !dumped45) {
+                int q;
+                dumped45 = 1;
+                fprintf (stderr, "--- CW 75500..75520 ---\n");
+                for (q = 075500; q < 075520; ++q) {
+                    unsigned long long v = 0;
+                    int b;
+                    for (b = 0; b < 6; ++b)
+                        v = (v << 8) | core[q].w_b [b];
+                    fprintf (stderr, "CW %05o %016llo\n", q, v);
+                }
+                fprintf (stderr, "--- CORE 12000..13400 (МОNRЕАD* pc 12203..) ---\n");
+                for (q = 012000; q < 013400; ++q) {
+                    unsigned long long v = 0;
+                    int b;
+                    for (b = 0; b < 6; ++b)
+                        v = (v << 8) | core[q].w_b [b];
+                    fprintf (stderr, "%05o %016llo\n", q, v);
+                }
+            }
+        }
         if (uil.i_opcode & 4) {         /* физобмен */
                 zone += (u - phdrum) * 040;
                 if (phys_dd.diskh) {
@@ -2048,6 +2134,44 @@ ddio(void)
         }
         if (!dd->diskh) {
             if (!dd->diskno) {
+                if (dd_debug ())
+                {
+                    /* отладка этапа 1: дамп МОNRЕАD* из памяти задачи */
+                    int q;
+                    fprintf (stderr, "ddio: E_CWERR u=%02o zone=%04o "
+                             "uil=%o reg=%o addr=%o / uir=%o addr=%o / "
+                             "pc=%05o right=%d r016=%05o\n",
+                             u, zone, uil.i_opcode, uil.i_reg, uil.i_addr,
+                             uir.i_opcode, uir.i_addr,
+                             pc, right, reg[016]);
+                    {
+                        int s0 = reg[016];
+                        int b2;
+                        for (b2 = 0; b2 < 4; ++b2) {
+                            unsigned long long v = 0;
+                            int b;
+                            for (b = 0; b < 6; ++b)
+                                v = (v << 8) | core[s0 + b2].w_b [b];
+                            fprintf (stderr, "CW %05o %012llo\n", s0 + b2, v);
+                        }
+                    }
+                    fprintf (stderr, "--- CORE 12000..13400 (МОNRЕАД* pc 12203..) ---\n");
+                    for (q = 012000; q < 013400; ++q) {
+                        unsigned long long v = 0;
+                        int b;
+                        for (b = 0; b < 6; ++b)
+                            v = (v << 8) | core[q].w_b [b];
+                        fprintf (stderr, "%05o %012llo\n", q, v);
+                    }
+                    fprintf (stderr, "--- CORE SUP 100000..177777 ---\n");
+                    for (q = 0100000; q < 0200000; ++q) {
+                        unsigned long long v = 0;
+                        int b;
+                        for (b = 0; b < 6; ++b)
+                            v = (v << 8) | core[q].w_b [b];
+                        fprintf (stderr, "%05o %012llo\n", q - 0100000, v);
+                    }
+                }
                 return E_CWERR;
             } else {
                 if (!(dd->diskh = disk_open(dd->diskno, dd->mode)))
@@ -2248,8 +2372,12 @@ ttin(uchar flags, ushort a1, ushort a2)
         else
                 fputs("-\r", stdout);
         fflush(stdout);
-        if (! fgets((char*) buf, sizeof(buf), stdin))
-                buf[0] = '\n';
+        if (! fgets((char*) buf, sizeof(buf), stdin)) {
+                if (feof(stdin))
+                        return E_TERM;
+                perror("stdin");
+                return E_INT;
+        }
         dp = core[a1].w_b;
         sp = buf;
         while (dp - core[a1].w_b < (a2 - a1 + 1) * 6) {
@@ -2486,7 +2614,12 @@ physaddr(void)
         case 0476:
                 acc.l = 0; acc.r = 077740000; /* МОНИТ */
                 break;
+        case 0603:
+        case 0604:
+                acc.l = 077777777; acc.r = 077777777; /* НОММБ, НОММБ1 */
+                break;
         case 0500: /* для МС ДУБНА */
+        case 0765:
         case 01026:
                 acc.l = acc.r = 0;
                 break;
