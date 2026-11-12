@@ -418,8 +418,15 @@ main(int argc, char **argv)
 	}
 	if (pout_enable && xnative && pout_raw)
 		pout_dump(pout_raw);
-	if (drum_dump_filename)
+	if (drum_dump_filename) {
 		drum_dump(027, drum_dump_filename);
+		/* Шаг 0 (ГЛИССАДА): дамп барабанов 20 и 21 (входной поток) */
+		char fn[512];
+		snprintf(fn, sizeof(fn), "%s.m20", drum_dump_filename);
+		drum_dump(020, fn);
+		snprintf(fn, sizeof(fn), "%s.m21", drum_dump_filename);
+		drum_dump(021, fn);
+	}
 	terminate();
 	ib_cleanup();
 	return (0);
