@@ -290,9 +290,15 @@ dbg:
             }
             if (dbg && montrace > 0) {
                 unsigned long long mv = ((unsigned long long)acc.l << 24) | acc.r;
-                fprintf(stderr, "MTR %05o%c %-6s %o(%o) AU=%013llo\n",
+                fprintf(stderr, "MTR %05o%c %-6s %o(%o) AU=%013llo",
                         abpc, abright ? 'R' : 'L', op.o_name,
                         addr, ui.i_reg, mv);
+                /* Шаг 4в (ГЛИССАДА): печать всех М-регистров для реверса */
+                fprintf(stderr, " M:");
+                for (int rr = 1; rr <= 14; ++rr)
+                    fprintf(stderr, " %02o=%05o", rr, reg[rr] & 077777);
+                fprintf(stderr, " R16=%05o R17=%05o\n",
+                        reg[016] & 077777, reg[017] & 077777);
                 --montrace;
             }
             if (dbg && abpc == 010354 && abright) {
