@@ -231,8 +231,21 @@ dbg:
              * (печатается только при BESM6_DD_DEBUG) */
             static int montrace = 0, monseen = 0;
             int dbg = dd_debug ();
-            if (abpc >= 010260 && abpc <= 012500 && !monseen)
-                { montrace = 30000; monseen = 1; }
+            /* Шаг 2б (ГЛИССАДА): окно MTR настраивается через
+             * BESM6_MTR_LO/BESM6_MTR_HI (восьмеричные) и длина через
+             * BESM6_MTR_N (десятичная); по умолчанию 10260-12500,
+             * 30000 команд (комплектация GLIS1R). */
+            static int mtr_lo = -1, mtr_hi = -1, mtr_n = 0;
+            if (mtr_lo < 0) {
+                const char *s = getenv ("BESM6_MTR_LO");
+                const char *h = getenv ("BESM6_MTR_HI");
+                const char *n = getenv ("BESM6_MTR_N");
+                mtr_lo = s ? (int) strtol (s, NULL, 8) : 010260;
+                mtr_hi = h ? (int) strtol (h, NULL, 8) : 012500;
+                mtr_n  = n ? atoi (n) : 30000;
+            }
+            if (abpc >= mtr_lo && abpc <= mtr_hi && !monseen)
+                { montrace = mtr_n; monseen = 1; }
             if (dbg && ui.i_opcode == 070)   /* Э70 */
                 fprintf(stderr, "E70at %05o%c r016=%05o uil=%o/%o uir=%o/%o\n",
                         abpc, abright ? 'R' : 'L', reg[016],
