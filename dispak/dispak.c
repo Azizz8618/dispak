@@ -422,6 +422,8 @@ main(int argc, char **argv)
 		drum_dump(027, drum_dump_filename);
 		/* Шаг 0 (ГЛИССАДА): дамп барабанов 20 и 21 (входной поток) */
 		char fn[512];
+		snprintf(fn, sizeof(fn), "%s.m14", drum_dump_filename);
+		drum_dump(014, fn);
 		snprintf(fn, sizeof(fn), "%s.m20", drum_dump_filename);
 		drum_dump(020, fn);
 		snprintf(fn, sizeof(fn), "%s.m21", drum_dump_filename);
