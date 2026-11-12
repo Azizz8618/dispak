@@ -2123,6 +2123,28 @@ ddio(void)
                 }
             }
         }
+        /* Шаг 2ж (ГЛИССАДА): перенаправление чтения входного потока
+         * задачи (монread% идёт по шаблону УИР 45/0 на диск) на
+         * барабан-спул МОНЫ, куда та уже положила колоду с картами
+         * данных (Шаг 2е: буфер 76000 = спул, ISO-8бит, EOR).
+         * BESM6_LUN45_DRUM=барабан (восьм.), BESM6_LUN45_TRACT=тракт. */
+        {
+            static int l45_drum = -1, l45_tract = -1;
+            if (l45_drum < 0) {
+                const char *d = getenv ("BESM6_LUN45_DRUM");
+                const char *t = getenv ("BESM6_LUN45_TRACT");
+                l45_drum  = d ? (int) strtol (d, NULL, 8) : -1;
+                l45_tract = t ? (int) strtol (t, NULL, 8) : 0;
+            }
+            if (l45_drum >= 0 && u == 045) {
+                u = l45_drum;
+                zone = l45_tract;
+                dd = disks + u;     /* dd уже назначен по старому u */
+                if (dd_debug ())
+                    fprintf (stderr, "LUN45 redirect -> u=%02o z=%04o\n",
+                             u, zone);
+            }
+        }
         if (uil.i_opcode & 4) {         /* физобмен */
                 zone += (u - phdrum) * 040;
                 if (phys_dd.diskh) {
