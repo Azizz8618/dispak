@@ -231,6 +231,7 @@ dbg:
              * (печатается только при BESM6_DD_DEBUG) */
             static int montrace = 0, monseen = 0;
             int dbg = dd_debug ();
+            static int core_on_pc = -1, core_done = 0;
             /* Шаг 2б (ГЛИССАДА): окно MTR настраивается через
              * BESM6_MTR_LO/BESM6_MTR_HI (восьмеричные) и длина через
              * BESM6_MTR_N (десятичная); по умолчанию 10260-12500,
@@ -243,6 +244,10 @@ dbg:
                 mtr_lo = s ? (int) strtol (s, NULL, 8) : 010260;
                 mtr_hi = h ? (int) strtol (h, NULL, 8) : 012500;
                 mtr_n  = n ? atoi (n) : 30000;
+            }
+            if (core_on_pc < 0) {
+                const char *c = getenv ("BESM6_CORE_ON_PC");
+                core_on_pc = c ? (int) strtol (c, NULL, 8) : 0;
             }
             if (abpc >= mtr_lo && abpc <= mtr_hi && !monseen)
                 { montrace = mtr_n; monseen = 1; }
@@ -259,6 +264,30 @@ dbg:
                 fprintf(stderr, "E62at %05o%c r016=%05o acc=%08o%08o\n",
                         abpc, abright ? 'R' : 'L', reg[016],
                         (uint)acc.l, (uint)acc.r);
+            /* Шаг 2е (ГЛИССАДА): дамп памяти задачи при попадании pc
+             * на адрес BESM6_CORE_ON_PC (восьмеричный). */
+            if (dbg && core_on_pc > 0 && abpc == core_on_pc && !core_done) {
+                FILE *cf = fopen ("core-pc.bin", "wb");
+                int q;
+                core_done = 1;
+                if (cf) {
+                    for (q = 0; q < 32768; ++q) {
+                        unsigned long long v = 0;
+                        int b;
+                        for (b = 0; b < 6; ++b)
+                            v = (v << 8) | core[q].w_b[b];
+                        fputc ((v >> 40) & 0xFF, cf);
+                        fputc ((v >> 32) & 0xFF, cf);
+                        fputc ((v >> 24) & 0xFF, cf);
+                        fputc ((v >> 16) & 0xFF, cf);
+                        fputc ((v >> 8) & 0xFF, cf);
+                        fputc (v & 0xFF, cf);
+                    }
+                    fclose (cf);
+                    fprintf (stderr, "CORE DUMPED at pc=%05o -> core-pc.bin\n",
+                             abpc);
+                }
+            }
             if (dbg && montrace > 0) {
                 unsigned long long mv = ((unsigned long long)acc.l << 24) | acc.r;
                 fprintf(stderr, "MTR %05o%c %-6s %o(%o) AU=%013llo\n",
