@@ -394,6 +394,41 @@ main(int argc, char **argv)
 		disks[i].diskh = drumh;
 		disks[i].offset = i * 040;
 	}
+	/* Шаг 6 (ГЛИССАДА): подсадка лист-конверта в барабан-спул МОНЫ
+	 * до старта задачи.  BESM6_DRUM_SEED=файл-заготовка;
+	 * BESM6_DRUM_SEED_DRUM=барабан (восьм., умолч. 020);
+	 * BESM6_DRUM_SEED_TRACT=тракт (восьм., умолч. 04).
+	 * Формат записи файла: 1024 слова по 6 байт (BE) + 1024 байта
+	 * конволюции; запись k подсаживается на тракт (tract+k). */
+	{
+		const char *sf = getenv ("BESM6_DRUM_SEED");
+		if (sf) {
+			const char *sd = getenv ("BESM6_DRUM_SEED_DRUM");
+			const char *st = getenv ("BESM6_DRUM_SEED_TRACT");
+			int drum  = sd ? (int) strtol (sd, NULL, 8) : 020;
+			int tract = st ? (int) strtol (st, NULL, 8) : 04;
+			FILE *fp = fopen (sf, "rb");
+			if (! fp) {
+				fprintf (stderr, "DRUM_SEED: cannot open %s\n", sf);
+			} else {
+				char buf [6144], cvbuf [1024];
+				int k, applied = 0;
+				for (k = 0; ; ++k) {
+					if (fread (buf, 1, 6144, fp) != 6144 ||
+					    fread (cvbuf, 1, 1024, fp) != 1024)
+						break;
+					disk_writei (drumh,
+							disks [drum].offset + tract + k,
+							buf, cvbuf, NULL, DISK_MODE_QUIET);
+					++applied;
+				}
+				fclose (fp);
+				fprintf (stderr, "DRUM_SEED: %d tracts applied "
+					 "(drum %02o tract %02o+)\n",
+					 applied, drum, tract);
+			}
+		}
+	}
 	nh = disk_open(0, DISK_READ_WRITE);
 	if (! nh)
 		exit(1);
