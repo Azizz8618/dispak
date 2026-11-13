@@ -406,6 +406,50 @@ dbg:
                 fflush(stderr);
         }
 
+        /* ГЛИССАДА 13.11-2: точка наблюдения BESM6_WATCH (восьм.) -
+         * печать обращений (чтение/запись) к ячейке по исполнительному
+         * адресу. BESM6_WATCH_RW: 0=все (умолч.), 1=только запись,
+         * 2=только чтение. Самомодифицируемый код: адрес вычисляется
+         * по факту (XADDR), а не по полю команды. */
+        {
+            static int watch_addr = -2, watch_rw = 0, watch_done = 0;
+            if (! watch_done) {
+                const char *w = getenv ("BESM6_WATCH");
+                const char *r = getenv ("BESM6_WATCH_RW");
+                watch_addr = w ? (int) strtol (w, NULL, 8) : -2;
+                watch_rw = r ? atoi (r) : 0;
+                watch_done = 1;
+            }
+            if (watch_addr >= 0) {
+                static const uchar wops[] = { 000, 001, 004, 005, 006,
+                                              016, 017, 020, 021, 022, 023 };
+                int isw = 0;
+                unsigned qi;
+                for (qi = 0; qi < sizeof (wops); ++qi)
+                    if (ui.i_opcode == wops[qi]) { isw = 1; break; }
+                if (ui.i_opcode == 002) isw = 0;    /* MOD не пишет память */
+                {
+                    unsigned ea = XADDR(addr + reg[ui.i_reg]) & 077777;
+                    if (ea == (unsigned) watch_addr &&
+                        ((watch_rw == 0) ||
+                         (watch_rw == 1 && isw) ||
+                         (watch_rw == 2 && ! isw))) {
+                        unsigned long long mv =
+                                ((unsigned long long) acc.l << 24) | acc.r;
+                        fprintf (stderr,
+                                 "WATCH %05o%c %-6s %o(%o) EA=%05o %s "
+                                 "AU=%014llo M:",
+                                 abpc, abright ? 'R' : 'L', op.o_name,
+                                 addr, ui.i_reg, ea, isw ? "WR" : "RD", mv);
+                        for (qi = 1; qi <= 14; ++qi)
+                            fprintf (stderr, " %02o=%05o", qi, reg[qi] & 077777);
+                        fprintf (stderr, " R16=%05o R17=%05o\n",
+                                 reg[016] & 077777, reg[017] & 077777);
+                    }
+                }
+            }
+        }
+
         switch (op.o_inline) {
         case I_ATX:
                 STORE(acc, XADDR(addr + reg[ui.i_reg]));
