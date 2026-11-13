@@ -231,26 +231,41 @@ dbg:
              * (печатается только при BESM6_DD_DEBUG) */
             static int montrace = 0, monseen = 0;
             int dbg = dd_debug ();
-            static int core_on_pc = -1, core_done = 0;
+            static int core_on_pc = -1, core_done = 0, core_skip = 0;
             /* Шаг 2б (ГЛИССАДА): окно MTR настраивается через
              * BESM6_MTR_LO/BESM6_MTR_HI (восьмеричные) и длина через
              * BESM6_MTR_N (десятичная); по умолчанию 10260-12500,
              * 30000 команд (комплектация GLIS1R). */
-            static int mtr_lo = -1, mtr_hi = -1, mtr_n = 0;
+            static int mtr_lo = -1, mtr_hi = -1, mtr_n = 0, mtr_skip = 0;
             if (mtr_lo < 0) {
                 const char *s = getenv ("BESM6_MTR_LO");
                 const char *h = getenv ("BESM6_MTR_HI");
                 const char *n = getenv ("BESM6_MTR_N");
+                const char *k = getenv ("BESM6_MTR_SKIP");
                 mtr_lo = s ? (int) strtol (s, NULL, 8) : 010260;
                 mtr_hi = h ? (int) strtol (h, NULL, 8) : 012500;
                 mtr_n  = n ? atoi (n) : 30000;
+                mtr_skip = k ? atoi (k) : 0;
             }
             if (core_on_pc < 0) {
                 const char *c = getenv ("BESM6_CORE_ON_PC");
+                const char *cs = getenv ("BESM6_CORE_SKIP");
                 core_on_pc = c ? (int) strtol (c, NULL, 8) : 0;
+                core_skip = cs ? atoi (cs) : 0;
             }
-            if (abpc >= mtr_lo && abpc <= mtr_hi && !monseen)
-                { montrace = mtr_n; monseen = 1; }
+            if (abpc >= mtr_lo && abpc <= mtr_hi) {
+                /* BESM6_MTR_SKIP: пропустить первые K срабатываний окна
+                 * (реверс повторно входных процедур - ГЛИССАДА 13.11). */
+                if (! monseen) {
+                    monseen = 1;
+                    if (mtr_skip > 0) --mtr_skip;
+                    else montrace = mtr_n;
+                } else if (mtr_skip > 0) {
+                    --mtr_skip;
+                } else if (montrace <= 0) {
+                    montrace = mtr_n;   /* ре-арминг окна */
+                }
+            }
             if (dbg && ui.i_opcode == 070)   /* Э70 */
                 fprintf(stderr, "E70at %05o%c r016=%05o uil=%o/%o uir=%o/%o\n",
                         abpc, abright ? 'R' : 'L', reg[016],
@@ -267,11 +282,15 @@ dbg:
             /* Шаг 2е (ГЛИССАДА): дамп памяти задачи при попадании pc
              * на адрес BESM6_CORE_ON_PC (восьмеричный). */
             if (dbg && core_on_pc > 0 && abpc == core_on_pc && !core_done) {
+                /* BESM6_CORE_SKIP: пропустить первые K попаданий
+                 * (тиражируемые члены грузятся многократно - 13.11). */
+                if (core_skip > 0) { --core_skip; }
+                else {
                 FILE *cf = fopen ("core-pc.bin", "wb");
                 int q;
                 core_done = 1;
                 if (cf) {
-                    for (q = 0; q < 32768; ++q) {
+                    for (q = 0; q < 65536; ++q) {   /* ГЛИССАДА: полное ядро (супервизор 0100000+) */
                         unsigned long long v = 0;
                         int b;
                         for (b = 0; b < 6; ++b)
@@ -284,8 +303,29 @@ dbg:
                         fputc (v & 0xFF, cf);
                     }
                     fclose (cf);
+                    /* ГЛИССАДА 13.11: дамп кэша команд (uicore) - члены
+                     * выгружаются из core, но кэш живёт до перезагрузки */
+                    cf = fopen ("core-uic.bin", "wb");
+                    if (cf) {
+                        for (q = 0; q < 65536; ++q) {
+                            unsigned int c0 = ((uicore[q][0].i_reg & 017) << 20) |
+                                              (uicore[q][0].i_opcode << 12) |
+                                              (uicore[q][0].i_addr & 07777);
+                            unsigned int c1 = ((uicore[q][1].i_reg & 017) << 20) |
+                                              (uicore[q][1].i_opcode << 12) |
+                                              (uicore[q][1].i_addr & 07777);
+                            fputc ((c0 >> 16) & 0xFF, cf);
+                            fputc ((c0 >> 8) & 0xFF, cf);
+                            fputc (c0 & 0xFF, cf);
+                            fputc ((c1 >> 16) & 0xFF, cf);
+                            fputc ((c1 >> 8) & 0xFF, cf);
+                            fputc (c1 & 0xFF, cf);
+                        }
+                        fclose (cf);
+                    }
                     fprintf (stderr, "CORE DUMPED at pc=%05o -> core-pc.bin\n",
                              abpc);
+                    }
                 }
             }
             if (dbg && montrace > 0) {

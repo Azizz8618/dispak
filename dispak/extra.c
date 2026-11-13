@@ -2146,6 +2146,18 @@ ddio(void)
                  * BESM6_DRUM_SEED_DRUM (восьм., умолч. = LUN45_DRUM). */
                 static int seeded = 0;
                 if (! seeded) {
+                    /* Шаг 6-бис (ГЛИССАДА, план А2 п.11.9-2): позиционировать
+                     * указатель входного потока КCOUNT*[0600] на начало
+                     * конверта в буфере 76000 - МОНИТОР при старте задачи по
+                     * *execute НЕ ставит его на карты данных (п.11.7).
+                     * BESM6_LUN45_KCOUNT=адрес (восьм.). */
+                    const char *kc = getenv ("BESM6_LUN45_KCOUNT");
+                    if (kc) {
+                        ushort kv = (ushort) strtol (kc, NULL, 8);
+                        core [0600].w_b [4] = (kv >> 8) & 0xFF;
+                        core [0600].w_b [5] = kv & 0xFF;
+                        fprintf (stderr, "KCOUNT [0600] := %05o\n", kv);
+                    }
                     const char *sf = getenv ("BESM6_DRUM_SEED");
                     seeded = 1;
                     if (sf) {
