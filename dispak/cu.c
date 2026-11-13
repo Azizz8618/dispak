@@ -325,6 +325,22 @@ dbg:
                     }
                     fprintf (stderr, "CORE DUMPED at pc=%05o -> core-pc.bin\n",
                              abpc);
+                    /* ГЛИССАДА 13.11: контрольные ячейки конвейера ввода */
+                    {
+                        int qa;
+                        static const int wcells[] = {0600, 0603, 0607, 0624,
+                                                     0417, 0577, 0600, 0601,
+                                                     02034, 02035, 02401};
+                        for (qa = 0; qa < 11; ++qa) {
+                            int c2 = wcells[qa];
+                            unsigned long long v2 = 0;
+                            int b2;
+                            for (b2 = 0; b2 < 6; ++b2)
+                                v2 = (v2 << 8) | core [c2].w_b [b2];
+                            fprintf (stderr, "CWCHK [%05o] = %014llo\n",
+                                     c2, v2);
+                        }
+                    }
                     }
                 }
             }
