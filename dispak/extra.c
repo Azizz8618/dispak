@@ -2214,6 +2214,35 @@ ddio(void)
                              u, zone);
             }
         }
+        /* А2 13.11-10 (ГЛИССАДА, п.18.11(3)): ЛУН46 = следующий лист
+         * очереди спула. После исчерпания листа ЛУН45 GIVELEXX (05355)
+         * читает Э70 с юнитом 46 (УС 0o0010370000460000, зона 0 ->
+         * лист 37000); на реальной системе следующий лист существует
+         * (следующее задание очереди), в прогоне k12 юнит 46 не
+         * подключён (disks[46].diskno=0) -> E_CWERR "ОШ.В ИНФ.СЛ.ЭКСТ".
+         * Подсадка: запись 1 сида k12 уже лежит на тракте
+         * BESM6_LUN46_TRACT барабана BESM6_LUN46_DRUM (подсажена
+         * DRUM_SEED вместе с конвертом); это пустой лист с маркером
+         * конца [11200]@0o12 -> штатный "конец очереди".
+         * Side-effects (KCOUNT/EXECUTE/DRUM_SEED) остаются при первом
+         * redirect u=45 - здесь только переадресация обмена. */
+        {
+            static int l46_drum = -1, l46_tract = -1;
+            if (l46_drum < 0) {
+                const char *d = getenv ("BESM6_LUN46_DRUM");
+                const char *t = getenv ("BESM6_LUN46_TRACT");
+                l46_drum  = d ? (int) strtol (d, NULL, 8) : -1;
+                l46_tract = t ? (int) strtol (t, NULL, 8) : 0;
+            }
+            if (l46_drum >= 0 && u == 046) {
+                u = l46_drum;
+                zone = l46_tract;
+                dd = disks + u;     /* dd уже назначен по старому u */
+                if (dd_debug ())
+                    fprintf (stderr, "LUN46 redirect -> u=%02o z=%04o\n",
+                             u, zone);
+            }
+        }
         if (uil.i_opcode & 4) {         /* физобмен */
                 zone += (u - phdrum) * 040;
                 if (phys_dd.diskh) {
