@@ -2137,6 +2137,42 @@ ddio(void)
                 l45_tract = t ? (int) strtol (t, NULL, 8) : 0;
             }
             if (l45_drum >= 0 && u == 045) {
+                /* Шаг 6 (ГЛИССАДА): подсадка лист-конверта в барабан-спул
+                 * МОНЫ - в момент ПЕРВОГО redirect: спулирование МОНЫ
+                 * к этому времени завершено, конверт не затирается.
+                 * BESM6_DRUM_SEED=файл-заготовка; формат записи:
+                 * 1024 слова по 6 байт (BE) + 1024 байта конволюции;
+                 * запись k подсаживается на тракт (tract+k) барабана
+                 * BESM6_DRUM_SEED_DRUM (восьм., умолч. = LUN45_DRUM). */
+                static int seeded = 0;
+                if (! seeded) {
+                    const char *sf = getenv ("BESM6_DRUM_SEED");
+                    seeded = 1;
+                    if (sf) {
+                        const char *sd = getenv ("BESM6_DRUM_SEED_DRUM");
+                        int sdrum = sd ? (int) strtol (sd, NULL, 8) : l45_drum;
+                        int k, applied = 0;
+                        FILE *fp = fopen (sf, "rb");
+                        if (! fp)
+                            fprintf (stderr, "DRUM_SEED: cannot open %s\n", sf);
+                        else {
+                            char sbuf [6144], scvbuf [1024];
+                            for (k = 0; ; ++k) {
+                                if (fread (sbuf, 1, 6144, fp) != 6144 ||
+                                    fread (scvbuf, 1, 1024, fp) != 1024)
+                                    break;
+                                disk_writei (drumh,
+                                        disks [sdrum].offset + l45_tract + k,
+                                        sbuf, scvbuf, NULL, DISK_MODE_QUIET);
+                                ++applied;
+                            }
+                            fclose (fp);
+                            fprintf (stderr, "DRUM_SEED: %d tracts applied "
+                                     "(drum %02o tract %02o+)\n",
+                                     applied, sdrum, l45_tract);
+                        }
+                    }
+                }
                 u = l45_drum;
                 zone = l45_tract;
                 dd = disks + u;     /* dd уже назначен по старому u */
