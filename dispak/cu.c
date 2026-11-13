@@ -450,6 +450,29 @@ dbg:
             }
         }
 
+        /* ГЛИССАДА 13.11-3: лог операнда аох 0(17) - слова, которые
+         * сканер РЛС (77176/77143) OR-ит в накопитель [3].
+         * BESM6_AOX17_LOG=1 включает печать pc, EA, операнда. */
+        {
+            static int aox17_log = -1;
+            if (aox17_log < 0)
+                aox17_log = getenv ("BESM6_AOX17_LOG") ? 1 : 0;
+            if (aox17_log && ui.i_opcode == 015 && ui.i_reg == 017) {
+                unsigned qa = XADDR (addr + reg[017]) & 077777;
+                unsigned long long qv = 0;
+                int qb;
+                for (qb = 0; qb < 6; ++qb)
+                    qv = (qv << 8) | core[qa].w_b[qb];
+                fprintf (stderr,
+                         "AOX17 %05o%c EA=%05o [%05o]=%014llo "
+                         "acc=%08o%08o M5=%05o M12=%05o M15=%05o\n",
+                         abpc, abright ? 'R' : 'L', qa, qa, qv,
+                         (uint) acc.l, (uint) acc.r,
+                         reg[5] & 077777, reg[12] & 077777,
+                         reg[15] & 077777);
+            }
+        }
+
         switch (op.o_inline) {
         case I_ATX:
                 STORE(acc, XADDR(addr + reg[ui.i_reg]));
