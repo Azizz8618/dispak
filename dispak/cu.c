@@ -257,6 +257,8 @@ dbg:
             if (kcount_on_pc < 0) {
                 const char *c = getenv ("BESM6_KCOUNT_ON_PC");
                 kcount_on_pc = c ? (int) strtol (c, NULL, 8) : 0;
+                fprintf (stderr, "KCNT: on_pc=%05o env=%s\n",
+                         kcount_on_pc, c ? c : "(none)");
             }
             if (abpc >= mtr_lo && abpc <= mtr_hi) {
                 /* BESM6_MTR_SKIP: пропустить первые K срабатываний окна
