@@ -232,6 +232,7 @@ dbg:
             static int montrace = 0, monseen = 0;
             int dbg = dd_debug ();
             static int core_on_pc = -1, core_done = 0, core_skip = 0;
+            static int kcount_on_pc = -1, kcount_done = 0;
             /* Шаг 2б (ГЛИССАДА): окно MTR настраивается через
              * BESM6_MTR_LO/BESM6_MTR_HI (восьмеричные) и длина через
              * BESM6_MTR_N (десятичная); по умолчанию 10260-12500,
@@ -252,6 +253,10 @@ dbg:
                 const char *cs = getenv ("BESM6_CORE_SKIP");
                 core_on_pc = c ? (int) strtol (c, NULL, 8) : 0;
                 core_skip = cs ? atoi (cs) : 0;
+            }
+            if (kcount_on_pc < 0) {
+                const char *c = getenv ("BESM6_KCOUNT_ON_PC");
+                kcount_on_pc = c ? (int) strtol (c, NULL, 8) : 0;
             }
             if (abpc >= mtr_lo && abpc <= mtr_hi) {
                 /* BESM6_MTR_SKIP: пропустить первые K срабатываний окна
@@ -341,6 +346,31 @@ dbg:
                                      c2, v2);
                         }
                     }
+                    }
+                }
+            }
+            /* А2 13.11-18 (ГЛИССАДА, п.18.18(1)): восстановление
+             * характеристики строки MONCARD [0417] (A+L; РЛС-ротация
+             * пишет веса 0414-0416, стадию 0417 не выполняет - патч
+             * Шага 14.8-3) на КАЖДОМ входе конвейера READ/WRITE
+             * (pc = BESM6_KCOUNT_ON_PC, восьмеричный). В g1r-прогоне
+             * [0417] обнуляется ротацией на каждой записи, единичный
+             * реарм при redirect u=45 теряется -> 201-петля на картах
+             * данных (g1r-native3/4/6, echo "RЕСОRD⊃ 5 1").
+             * ВНИМАНИЕ: КCOUNT*[0600] НЕ трогать - это естественный
+             * указатель лексем-потока (команды -> данные); запись в
+             * него на 01000 ломает командный разбор (g1r-native7:
+             * "ОТСУТСТВУЕТ П/К *NAME"). */
+            if (dbg && kcount_on_pc > 0 && abpc == kcount_on_pc) {
+                const char *ex = getenv ("BESM6_LUN45_EXECUTE");
+                if (ex && getenv ("BESM6_LUN45_NATIVE")) {
+                    ushort ev = (ushort) strtol (ex, NULL, 8);
+                    core [0417].w_b [4] = 0;
+                    core [0417].w_b [5] = ev & 0xFF;
+                    if (! kcount_done) {
+                        kcount_done = 1;
+                        fprintf (stderr, "EXECUTE [0417] := %05o at pc %05o (each entry)\n",
+                                 ev, abpc);
                     }
                 }
             }

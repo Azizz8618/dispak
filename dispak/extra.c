@@ -2059,6 +2059,226 @@ put_check_words(ushort u, ushort zone, ushort addr, int copy2_req) {
         STORE(t, 017);  /* checksum */
 }
 
+/* А2 13.11-18 (ГЛИССАДА, п.18.18(1)-(2)): конверт-вид родной зоны УИР.
+ * Возвращает 1, если развёртка построена и записана, 0 - если данные
+ * в зоне ещё не полны (попытка повторяется на следующем Э70 ЛУН45).
+ *
+ * ДИАГНОЗ (g1r-native2..10): к моменту старта задачи зона УИР 20/04
+ * содержит КОНВЕРТ-ГОЛОВУ МОНЫ (121 запись: заголовок + записи спула,
+ *структура рабочая - разбор задачи шёл по ней), но записи данных
+ * лежат в RLE (байт 0o200+N = N пробелов, EOR-байт 0o12 инлайн),
+ * а конвейер READ(5) формирует MONCARD из РАЗВЁРНУТОГО ISO - RLE-байты
+ * отбрасываются, записи пустеют, 201-петля (п.18.6б). Замена листа
+ * k12-конвертом (g1r-native10) даёт "ИСПОРЧЕН РЕКОРД POINT 00012":
+ * слово 0o12 моны-конверта не [11201]. РЕШЕНИЕ: РАЗВЁРТКА - заголовок
+ * и записи до *EXECUTE остаются как есть, записи данных после
+ * *EXECUTE (включая *END FILE) переписываются в развёрнутый ISO-72
+ * (12 слов по 6 байт + слово EOR 0o1002004010020012, как в k12/seed-h),
+ * слово конца потока сохраняется. */
+#define NTV_MAXREC  700
+#define NTV_MAXLEN  96
+
+static uchar  ntv_nbuf [6144];   /* слова родной зоны */
+static uchar  ntv_ncv  [1024];
+static char   ntv_rec  [NTV_MAXREC] [NTV_MAXLEN];
+static uchar  ntv_kbuf [6144];   /* конверт-вид */
+static uchar  ntv_kcv  [1024];
+static uchar  ntv_tbuf [6144];   /* пустой лист ЛУН46 */
+static uchar  ntv_tcv  [1024];
+static int    ntv_active = 0;    /* 1 = конверт-вид построен, задача работает:
+                                    с этого момента М16=46 при УИР 20/04 =
+                                    печать-Э70 задачи (не приемный спул) */
+static int    nat_armed = 0;     /* 1 = УИК-проверка пройдена (старт задачи): */
+static int    nat_enabled = -1;  /* BESM6_LUN45_NATIVE кэш */
+
+static uint64_t
+ntv_gw (const uchar *b)
+{
+    int i;
+    uint64_t v = 0;
+    for (i = 0; i < 6; ++i)
+        v = (v << 8) | b [i];
+    return v;
+}
+
+static void
+ntv_pw (uchar *b, uint64_t v)
+{
+    int i;
+    for (i = 5; i >= 0; --i) {
+        b [i] = (uchar) (v & 0xFF);
+        v >>= 8;
+    }
+}
+
+/* карта -> 13 слов конверта: 12 слов ISO-72 (по 6 байт) + EOR-слово
+ * 0o1002004010020012 (эталон [М1+211], k12/seed-h; п.18.6б - MONCARD
+ * ест развёрнутый ISO, не RLE) */
+static int
+ntv_pack_iso72 (const char *text, uint64_t *out)
+{
+    uchar cs [72];
+    int i, j, n = strlen (text);
+    for (i = 0; i < 72; ++i) {
+        uchar c = (i < n) ? (uchar) text [i] : (uchar) 040;
+        if (c >= 'a' && c <= 'z')
+            c -= 32;
+        cs [i] = c;
+    }
+    for (i = 0; i < 12; ++i) {
+        uint64_t v = 0;
+        for (j = 0; j < 6; ++j)
+            v = (v << 8) | cs [i * 6 + j];
+        out [i] = v;
+    }
+    out [12] = 0x20202020200aULL;    /* WORD_EOR: 5 пробелов + 0o12 */
+    return 13;
+}
+
+static int
+lun45_native_view (int d45, int t45, int d46, int t46)
+{
+    const uint64_t mark_end  = (uint64_t) 03 << 45;   /* [11200] */
+    const uint64_t word_end  = 0xff000000000aULL;   /* 0o7760000000000012 */
+    int i, j, nrec = 0, exec_i = -1, endf_i = -1, ncards, pos;
+    int rstart [NTV_MAXREC], rend [NTV_MAXREC];
+    uint64_t zone_id;
+
+    if (d45 < 0)
+        return 0;
+    if (disk_readi (drumh, disks [d45].offset + t45,
+                    (char *) ntv_nbuf, (char *) ntv_ncv, NULL,
+                    DISK_MODE_QUIET) != DISK_IO_OK)
+        return 0;
+
+    /* 1. Декод RLE-записей родной зоны (п.18.4) с границами по словам:
+     *    байт 0o200+N = N пробелов, EOR-байт 0o12 инлайн (конец записи,
+     *    остаток слова - набивка), контрольные байты 0o240+ и нули в
+     *    текст не входят; конец потока = слово 0o7760000000000012. */
+    {
+        char cur [NTV_MAXLEN];
+        int cl = 0, wstart = 0;
+        for (i = 0; i < 1024; ++i) {
+            uint64_t w = ntv_gw (ntv_nbuf + i * 6);
+            int eor = 0;
+            if (w == word_end)
+                break;
+            for (j = 0; j < 6; ++j) {
+                int b = (int) ((w >> (8 * (5 - j))) & 0xFF);
+                if (b == 0012) {                /* EOR - конец записи */
+                    eor = 1;
+                    break;
+                }
+                if (b >= 0200 && b <= 0237) {
+                    int n = b - 0200;
+                    while (n-- > 0 && cl < NTV_MAXLEN - 1)
+                        cur [cl++] = ' ';
+                } else if (b >= 0040 && b <= 0176) {
+                    if (cl < NTV_MAXLEN - 1)
+                        cur [cl++] = (char) b;
+                }
+                /* прочие байты (0, 0o240+) - контрольные, пропускаем */
+            }
+            if (eor) {
+                cur [cl] = 0;
+                if (nrec < NTV_MAXREC) {
+                    rstart [nrec] = wstart;
+                    rend [nrec] = i;
+                    if (cl > 0)
+                        strcpy (ntv_rec [nrec], cur);
+                    else
+                        ntv_rec [nrec][0] = 0;
+                    ++nrec;
+                }
+                cl = 0;
+                wstart = i + 1;
+            }
+        }
+    }
+    for (i = 0; i < nrec; ++i) {
+        if (exec_i < 0 && ! strncmp (ntv_rec [i], "*EXECUTE", 8))
+            exec_i = i;
+        else if (exec_i >= 0 && ! strncmp (ntv_rec [i], "*END FILE", 9))
+            { endf_i = i; break; }
+    }
+    if (exec_i < 0 || endf_i < 0) {
+        if (dd_debug ())
+            fprintf (stderr, "LUN45 NATIVE: данных пока нет "
+                     "(записей %d, *EXECUTE@%d)\n", nrec, exec_i);
+        return 0;                               /* зона ещё не полна */
+    }
+    ncards = endf_i - exec_i;                   /* карты + *END FILE */
+
+    /* 2. РАЗВЁРТКА: записи данных после *EXECUTE (включая *END FILE)
+     *    переписываются в развёрнутый ISO-72 (12 слов + слово EOR
+     *    0o1002004010020012 - MONCARD-эталон), затем слово конца
+     *    потока, дальше нули. Заголовок МОНЫ сохраняется, но слово
+     *    0o12 = маркер листа [11201] (лист продолжается), conv=1 -
+     *    как в k12 (п.18.9в): обход GIVELEXX проверяет маркер на
+     *    сл.0o12 при повторной выборке листа (native11: текст МОНЫ
+     *    на 0o12 -> "ИСПОРЧЕН РЕКОРД POINT 00012"). */
+    memset (ntv_kbuf, 0, sizeof ntv_kbuf);
+    memset (ntv_kcv, 0, sizeof ntv_kcv);
+    pos = rend [exec_i] + 1;
+    memcpy (ntv_kbuf, ntv_nbuf, (size_t) pos * 6);
+    memcpy (ntv_kcv, ntv_ncv, (size_t) pos);
+    ntv_pw (ntv_kbuf + 012 * 6, (uint64_t) 06 << 45);   /* [11201] */
+    ntv_kcv [012] = 1;
+    for (i = 0; i < ncards && pos + 13 < 1024; ++i) {
+        uint64_t ws [13];
+        ntv_pack_iso72 (ntv_rec [exec_i + 1 + i], ws);
+        for (j = 0; j < 13; ++j) {
+            ntv_pw (ntv_kbuf + pos * 6, ws [j]);
+            ntv_kcv [pos] = 0;                  /* как у записей МОНЫ */
+            ++pos;
+        }
+    }
+    if (i < ncards || pos >= 1024)
+        return 0;                               /* не умещается */
+    ntv_pw (ntv_kbuf + pos * 6, word_end);      /* конец потока */
+    ntv_kcv [pos] = 0;
+    ++pos;
+
+    /* 3. Запись развёртки НА МЕСТО родной зоны из УИР. */
+    zone_id = disks [d45].offset + t45;
+    if (disk_writei (drumh, zone_id, (char *) ntv_kbuf, (char *) ntv_kcv,
+                     NULL, DISK_MODE_QUIET) != DISK_IO_OK)
+        return 0;
+
+    /* 4. Пустой лист на тракт ЛУН46 ([11200]@0o12, conv=1) - конец
+     *    очереди для обхода GIVELEXX (как запись 1 сида k12). */
+    if (d46 >= 0) {
+        memset (ntv_tbuf, 0, sizeof ntv_tbuf);
+        memset (ntv_tcv, 0, sizeof ntv_tcv);
+        ntv_pw (ntv_tbuf + 012 * 6, mark_end);
+        ntv_tcv [012] = 1;
+        disk_writei (drumh, disks [d46].offset + t46, (char *) ntv_tbuf,
+                     (char *) ntv_tcv, NULL, DISK_MODE_QUIET);
+    }
+
+    /* 5. BESM6_LUN45_EXECUTE переустановка (в g1r [0417] обнуляется
+     *    ротацией MONCARD на каждой записи; см. также реарм по
+     *    BESM6_KCOUNT_ON_PC в cu.c). КCOUNT*[0600] НЕ трогаем -
+     *    естественный указатель лексем-потока (g1r-native7). */
+    {
+        const char *ex = getenv ("BESM6_LUN45_EXECUTE");
+        if (ex) {
+            ushort ev = (ushort) strtol (ex, NULL, 8);
+            core [0417].w_b [4] = 0;
+            core [0417].w_b [5] = ev & 0xFF;
+            fprintf (stderr, "EXECUTE [0417] := %05o (re-arm)\n", ev);
+        }
+    }
+    fprintf (stderr, "LUN45 NATIVE: зона %02o/%02o -> развёртка "
+             "(записей в зоне %d, карт данных %d:",
+             d45, t45, nrec, ncards);
+    for (i = exec_i + 1; i <= endf_i && i < exec_i + 6; ++i)
+        fprintf (stderr, " '%.20s'", ntv_rec [i]);
+    fprintf (stderr, ")\n");
+    ntv_active = 1;
+    return 1;
+}
+
 int
 ddio(void)
 {
@@ -2128,6 +2348,15 @@ ddio(void)
          * барабан-спул МОНЫ, куда та уже положила колоду с картами
          * данных (Шаг 2е: буфер 76000 = спул, ISO-8бит, EOR).
          * BESM6_LUN45_DRUM=барабан (восьм.), BESM6_LUN45_TRACT=тракт. */
+        /* А2 13.11-18: взведение nat_armed по предстартовой проверке УИК
+         * (М16=75504, УИР 45/0) - ОБЯЗАТЕЛЬНО ДО redirect-блоков: тот
+         * меняет u с 0o45 на барабан, и признак u==045 теряется
+         * (g1r-native9: блок стоял после redirect - взведение не
+         * сработало, конверт-вид не построился). */
+        if (nat_enabled < 0)
+            nat_enabled = getenv ("BESM6_LUN45_NATIVE") ? 1 : 0;
+        if (nat_enabled && reg [016] == 075504 && u == 045)
+            nat_armed = 1;
         {
             static int l45_drum = -1, l45_tract = -1;
             if (l45_drum < 0) {
@@ -2234,7 +2463,19 @@ ddio(void)
                 l46_drum  = d ? (int) strtol (d, NULL, 8) : -1;
                 l46_tract = t ? (int) strtol (t, NULL, 8) : 0;
             }
-            if (l46_drum >= 0 && u == 046) {
+            /* А2 13.11-18 (ГЛИССАДА, п.18.18(1)): в многолистовом
+             * задании (GLIS1R) УИК МОНЫ указывает и ЛУН45, и ЛУН46
+             * на ОДНУ зону 20/04 ("зона из УИР; последний писавший
+             * выигрывает", 18.17в): печать-Э70 задачи несёт М16=0o46
+             * при УИР 20/04, редирект по u=046 не срабатывает, WRITE(6)
+             * затирает конверт/поток -> I/O-ERROR 205/232/224 на печати
+             * (g1r-native4). Добавка reg[016]==0o46 ТОЛЬКО после
+             * построения конверт-вида (ntv_active): в приемном спуле
+             * МОНА тоже пишет с М16=0o46 (g1r-native5: разметка уходит
+             * на 20/05, трансляция читает мусор) - до старта задачи
+             * редирект только по u. */
+            if (l46_drum >= 0 && (u == 046 ||
+                                  (ntv_active && reg [016] == 046))) {
                 u = l46_drum;
                 zone = l46_tract;
                 dd = disks + u;     /* dd уже назначен по старому u */
@@ -2269,6 +2510,66 @@ ddio(void)
                     fprintf (stderr, "LUN%02o tail redirect -> u=%02o z=%04o\n",
                              oldu, u, zone);
             }
+        }
+        /* А2 13.11-18 (ГЛИССАДА, п.18.18(1)-(2)): НАТУРАЛЬНЫЙ ПУТЬ -
+         * конверт-вид РОДНОЙ зоны из УИР. Диагноз (RUNS/run-2026-11-14/
+         * g1r-noseed): МОНА-80 spoolирует входной поток (колода + карты
+         * данных после *execute) в зону УИР (ЛУН45 -> 20/04 по УИК
+         * супервизора) в СВОЁМ формате: RLE-текст (байт 0o200+N = N
+         * пробелов), EOR-байт 0o12 инлайн в последнем слове записи,
+         * контрольные байты 0o240+, конец потока 0o7760000000000012.
+         * Карты данных лежат в зоне (для GLIS1R: *EXECUTE@0o1142,
+         * карта 1 "    3    1    0    5    1"@0o1144, карта 2
+         * "   2400.   7351.     1.5     .60"@0o1146, *END FILE@0o1152,
+         * конец потока@0o1154 - dd.m20 g1r-noseed), НО читатель конверта
+         * (монread%) ждёт КОНВЕРТ-формат: заголовок, маркер [11201]/
+         * [11200] на сл.0o12, записи-границы через 0o32 слова (реверс
+         * п.18.9в; k12-конверт - READ OK в TSTREAD, п.18.10). На слове
+         * 0o12 нативной зоны стоит текст -> класс-контроль -> статус
+         * 0o21 -> "ИСПОРЧЕН РЕКОРД ... POINT 00012" (п.9.6). Штатной
+         * упаковки данных в конверт нет ни у dispak-МОНА, ни исторически
+         * (эталон GLIS1R.LOG: смерть на READ(5), п.18.15д); в drum 21
+         * (конверт-члены) данных тоже нет (g1r-native декод, 18.18(2)).
+         * BESM6_LUN45_NATIVE=1: при первом Э70 ЛУН45 (М16=0o45, чтение
+         * целой зоны), когда зона УИР уже содержит ПОЛНЫЙ набор данных
+         (*EXECUTE + карты + *END FILE + конец потока), читаем РОДНУЮ
+         * зону (drum LUN45_DRUM, tract LUN45_TRACT - как в УИР),
+         * выделяем записи данных после *EXECUTE, перепаковываем их в
+         * конверт-формат k12 (заголовок 4023/з0o554 + [11201]@0o12 +
+         * записи 0o32: 12 слов ISO-72 + EOR-слово + филлер, [11200] на
+         * последней границе) и пишем НА МЕСТО родной зоны; текущее Э70
+         * читает уже конверт-вид. Сид НЕ нужен: данные 1:1 из нативной
+         * зоны. На тракт ЛУН46 кладётся пустой лист ([11200]@0o12,
+         * conv=1) - штатный "конец очереди" для обхода GIVELEXX.
+         * BESM6_LUN45_EXECUTE переустанавливается ПОСЛЕ инициализации
+         * МОНЫ (в g1r-прогоне [0417] обнуляется при старте задачи). */
+        /* А2 13.11-18 (ГЛИССАДА, п.18.18(1)): взведение по предстартовой
+         * проверке УИК супервизором: Э70 с М16=75504 (ячейка ЛУН45 в
+         * УИК, УИР 45/0) выполняется ТОЛЬКО при старте задачи (*execute)
+         * - после этого идет выборка листа входного потока для задачи
+         * (М16=0o45). Приемные verify-чтения МОНЫ (М16=0o45 в процессе
+         * спулирования) и 121-записное состояние конверт-головы
+         * (g1r-native2: сборка на нем портила трансляцию "NONTEXT CARD";
+         * g1r-native3/4/6/8: конверт-вид перезаписывался дозаписью дека,
+         * цепочка лексем собиралась из RLE-дека -> 201-петля) мимо
+         * взведения. */
+        if (nat_armed && nat_enabled && reg [016] == 045 && (uil.i_opcode & 010)
+            && ! (uil.i_opcode & 4) && ! (uil.i_reg & 8)) {
+            static int natd = -1, natdone = 0, nd45, nt45, nd46, nt46;
+            if (natd < 0) {
+                const char *d, *t;
+                natd = 1;
+                d = getenv ("BESM6_LUN45_DRUM");
+                t = getenv ("BESM6_LUN45_TRACT");
+                nd45 = d ? (int) strtol (d, NULL, 8) : -1;
+                nt45 = t ? (int) strtol (t, NULL, 8) : 0;
+                d = getenv ("BESM6_LUN46_DRUM");
+                t = getenv ("BESM6_LUN46_TRACT");
+                nd46 = d ? (int) strtol (d, NULL, 8) : -1;
+                nt46 = t ? (int) strtol (t, NULL, 8) : 0;
+            }
+            if (! natdone && lun45_native_view (nd45, nt45, nd46, nt46))
+                natdone = 1;
         }
         if (uil.i_opcode & 4) {         /* физобмен */
                 zone += (u - phdrum) * 040;
