@@ -2155,7 +2155,9 @@ lun45_native_view (int d45, int t45, int d46, int t46)
         (uint64_t) 014 << 42, (uint64_t) 020 << 42,
         (uint64_t) 024 << 42, 0, 0
     };
-    const uint64_t filler = 0x202020202020ULL;      /* 6 ISO-пробелов */
+    const uint64_t filler = 01002004010020040ULL;   /* филлер k8-стиль
+     * (mk_seed_k12 FILLER = 0o1002004010020040, ISO-пробелы СИДА,
+     * "READ OK в TSTREAD"; v13/v14 использовали 0x202020202020) */
     const uint64_t headkey = (uint64_t) 034 << 42;  /* ключ-вес головы */
     int i, j, nrec = 0, exec_i = -1, endf_i = -1, ncards, pos, bnd;
     int rstart [NTV_MAXREC], rend [NTV_MAXREC];
@@ -2298,11 +2300,6 @@ lun45_native_view (int d45, int t45, int d46, int t46)
             ntv_pw (ntv_kbuf + pos * 6, filler);
             ntv_kcv [pos] = 2;
         }
-        /* v14: стадия 41 AC-контракта ("проверка на код 012", п.15.6)
-         * ждёт EOR-слово на КОНЦЕ 0o32-записи (как в h-сиде: EOR@0o45
-         * при границе 0o44) - маркер-граница на bnd, EOR на bnd-1 */
-        ntv_pw (ntv_kbuf + (bnd - 1) * 6, word_eor);
-        ntv_kcv [bnd - 1] = 2;
         ntv_pw (ntv_kbuf + bnd * 6,
                 (i == ncards - 1) ? mark_end : mark_cont);
         ntv_kcv [bnd] = 2;
@@ -2311,8 +2308,11 @@ lun45_native_view (int d45, int t45, int d46, int t46)
                                                  * сдвигал - карты затирали
                                                  * маркеры!) */
     }
-    ntv_pw (ntv_kbuf + pos * 6, mark_end);      /* хвост листа */
-    ntv_kcv [pos] = 2;
+    /* v15: СИД k12-стиль (mk_seed_k12.py, "READ OK в TSTREAD"):
+     * после последней границы [11200] на границе, ЗА ней - НУЛИ
+     * (buf и так обнулён) - дубль mark_end в хвосте УБРАН: МОНА
+     * конвейер после [11200] читал слово-дубль как начало новой
+     * записи (201-петля v13/v14 - 6 повторов карты 1). */
 
     /* 3. Запись конверта на ОТДЕЛЬНЫЙ тракт (BESM6_NTV_TRACT, умолч.
      *    06): native-зона МОНЫ НЕ трогается - дек RLE нужен МОНе для
