@@ -2245,12 +2245,35 @@ lun45_native_view (int d45, int t45, int d46, int t46)
         ntv_pw (ntv_kbuf + i * 6, k12_header [i]);
         ntv_kcv [i] = 1;
     }
+    /* v9 (п.18.20): КОНТРАКТ IOXXFMR (ioxxfmr%.asm, ETAP1 п.15.6:
+     * "AC - '1' в 48 р. = выход на новый рекорд; '0' - работа с
+     * массивом; 41 = проверка на код 012; 42 = закрытие рекорда"):
+     * каждая запись конверта = 0o32 слова: [AC-маркер нового рекорда
+     * 0o1000000000000000 ('1' в 48-м разряде = эталон-7 классификатора
+     * 10633; MTR g1r-mtr20: walker М4 ходит 0o12 -> 0o44 -> ... шаг
+     * 0o32, эталоны [М2+6]=0o24<<42 / [М2+7]=0o10<<42)][карта: 12 слов
+     * ISO-72 + EOR + филлер до 0o31]. Header как в h: лесенка +
+     * [11201]@0o12 + вес@0o13 conv=1. Конец листа: [11200] после
+     * последней записи (как mk_seed_k12). */
+    if (ntv_tract < 0) {
+        const char *t = getenv ("BESM6_NTV_TRACT");
+        ntv_tract = t ? (int) strtol (t, NULL, 8) : 06;
+    }
+    memset (ntv_kbuf, 0, sizeof ntv_kbuf);
+    memset (ntv_kcv, 0, sizeof ntv_kcv);
+    for (i = 0; i < 12; ++i) {
+        ntv_pw (ntv_kbuf + i * 6, k12_header [i]);
+        ntv_kcv [i] = 1;
+    }
     ntv_pw (ntv_kbuf + 012 * 6, mark_cont);
     ntv_kcv [012] = 1;
-    /* ключ-вес головы сразу за первым маркером (граница 0o12+1) */
     ntv_pw (ntv_kbuf + 013 * 6, headkey);
-    ntv_kcv [013] = 2;
+    ntv_kcv [013] = 1;
     pos = 014;
+    /* v12: границы 0o12+0o32k несут СЛОВО ЭТАЛОНА-7 классификатора
+     * (0o100000000000000, бит 42 - death-дамп [11177]; walker М4
+     * ходит 0o12 -> 0o44 -> 0o76), карты = 12 слов ISO + EOR + филлер
+     * между границами; конец листа = [11200] за последней картой. */
     for (i = 0; i < ncards; ++i) {
         uint64_t ws [13];
         bnd = 012 + 032 * (i + 1);              /* граница за записью */
@@ -2263,24 +2286,19 @@ lun45_native_view (int d45, int t45, int d46, int t46)
             ntv_pw (ntv_kbuf + pos * 6, ws [j]);
             ntv_kcv [pos] = 2;
         }
-        for (; pos < bnd; ++pos) {              /* филлер до границы */
+        for (; pos < bnd - 1; ++pos) {          /* филлер до эталона */
             ntv_pw (ntv_kbuf + pos * 6, filler);
             ntv_kcv [pos] = 2;
         }
-        ntv_pw (ntv_kbuf + bnd * 6,
-                (i == ncards - 1) ? mark_end : mark_cont);
-        ntv_kcv [bnd] = 2;
-        /* v3: ключ-вес головы 0o3400000000000000 СРАЗУ ЗА маркером
-         * (п.18.9в "ключ@граница+1"; в native15 смерть была на
-         * bnd+1 = 0o45 с [75445]=0o34 - walker ждёт ключ после
-         * маркера, карта на bnd+1 давала тип 1). Ключ затирает
-         * первое слово карты - филлер-слот за счёт записи (карта
-         * 13 слов + ключ = 14 <= 0o31). */
-        pos = bnd + 1;
-        ntv_pw (ntv_kbuf + pos * 6, headkey);
+        ntv_pw (ntv_kbuf + (bnd - 1) * 6, 010000000000000ULL);
+        ntv_kcv [bnd - 1] = 2;
+        pos = bnd;                              /* слово эталона-6 */
+        ntv_pw (ntv_kbuf + pos * 6, 0240000000000000ULL);
         ntv_kcv [pos] = 2;
         ++pos;
     }
+    ntv_pw (ntv_kbuf + pos * 6, mark_end);      /* конец листа */
+    ntv_kcv [pos] = 2;
 
     /* 3. Запись конверта на ОТДЕЛЬНЫЙ тракт (BESM6_NTV_TRACT, умолч.
      *    06): native-зона МОНЫ НЕ трогается - дек RLE нужен МОНе для
@@ -2416,7 +2434,43 @@ ddio(void)
          * сработало, конверт-вид не построился). */
         if (nat_enabled < 0)
             nat_enabled = getenv ("BESM6_LUN45_NATIVE") ? 1 : 0;
-        if (nat_enabled && reg [016] == 075504 && u == 045)
+        if (nat_enabled && reg [016] == 075504 && u == 045 && ! nat_armed) {
+            /* v5 (п.18.20): конверт строится и кладётся в буфер 76000
+             * СРАЗУ при УИК-проверке (arming): классификатор 10633
+             * читает [76000+М4] между arming и первым fetch'ем задачи
+             * (MTR g1r-mtr18: 12205 -> 10633 [76012]=старьё -> 00052).
+             * Развёртка на death-fetch (v2-v4) опаздывала всегда. */
+            static int natd5 = -1, natdone5 = 0, nd455, nt455, nd465, nt465;
+            nat_armed = 1;
+            if (natd5 < 0) {
+                const char *d, *t;
+                natd5 = 1;
+                d = getenv ("BESM6_LUN45_DRUM");
+                t = getenv ("BESM6_LUN45_TRACT");
+                nd455 = d ? (int) strtol (d, NULL, 8) : -1;
+                nt455 = t ? (int) strtol (t, NULL, 8) : 0;
+                d = getenv ("BESM6_LUN46_DRUM");
+                t = getenv ("BESM6_LUN46_TRACT");
+                nd465 = d ? (int) strtol (d, NULL, 8) : -1;
+                nt465 = t ? (int) strtol (t, NULL, 8) : 0;
+            }
+            if (! natdone5 && lun45_native_view (nd455, nt455, nd465, nt465)) {
+                natdone5 = 1;
+                /* v7 (п.18.20): САМ Э70 УИК-ПРОВЕРКИ (этот вызов ddio!)
+                 * перенаправляется на конверт-тракт: её буфер = 76000
+                 * (лексем-область, SHEET-лог: buf=76000), и МОНА-класс
+                 * конвейер (10633, между УИК-проверкой и первым fetch'ем)
+                 * ходит ИМЕННО по ней. В s6h-эре (h-сид на тракте 04)
+                 * УИК-проверка грузила в 76000 КОНВЕРТ штатно; в
+                 * натуральном пути она грузила 20/04 = RLE -> старьё
+                 * на [76012] -> тип 1 -> 0o21 -> ИСПОРЧЕН POINT 00012. */
+                u = nd455;
+                zone = ntv_tract > 0 ? ntv_tract : 06;
+                dd = disks + u;
+                fprintf (stderr, "NTV v7: УИК-проверка -> u=%02o z=%04o "
+                         "(конверт в буфер 76000)\n", u, zone);
+            }
+        } else if (nat_enabled && reg [016] == 075504 && u == 045)
             nat_armed = 1;
         {
             static int l45_drum = -1, l45_tract = -1;
@@ -2718,9 +2772,11 @@ ddio(void)
             int b;
             for (b = 0; b < 6; ++b)
                 w = (w << 8) | core [037012].w_b [b];
-            fprintf (stderr, "SHEET %s pc=%05o%c r016=%05o buf012=%016llo\n",
+            fprintf (stderr, "SHEET %s pc=%05o%c r016=%05o buf=%05o "
+                     "buf012=%016llo\n",
                      (uil.i_opcode & 010) ? "RD" : "WR",
-                     pc, right ? 'R' : 'L', reg [016], w);
+                     pc, right ? 'R' : 'L', reg [016],
+                     (uil.i_addr & 03700) << 4, w);
         }
         if (uil.i_reg & 8) {                // секторный обмен
                /* согласно ВЗУ и ХЛАМу, 36-й разряд означает, что номер "зоны"
