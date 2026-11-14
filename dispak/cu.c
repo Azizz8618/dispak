@@ -279,9 +279,16 @@ dbg:
              * конвейера (BESM6_KCOUNT_ON_PC=pc, восьм.) - ротация МОНЫ
              * затирает [0417] после первого redirect'а. */
             if (kcount_pc > 0 && abpc == kcount_pc) {
+                extern void glis1r_ntv_v19_patch (int);
                 static int kcnt_seen = 0;
                 core [0417].w_b [4] = 0;
                 core [0417].w_b [5] = 0414 & 0xFF;
+                /* v19 (п.18.26): подмена буфера 76000 k12-конвертом при
+                 * входе форматного конвейера МОНА-80 - МОНА-МОNREAD*
+                 * (12240-12254) затирает тела RLE-развёрткой листа
+                 * ПОСЛЕ arming; подмена перед исполнением команды
+                 * возвращает конверт-тела walker'у МОНА-80-I/O */
+                glis1r_ntv_v19_patch (abpc);
                 if (! kcnt_seen) {
                     kcnt_seen = 1;
                     fprintf (stderr, "EXECUTE [0417] := 00414 at pc %05o "

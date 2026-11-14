@@ -2075,6 +2075,34 @@ static int      nat_enabled = -1;   /* BESM6_LUN45_NATIVE */
 static int      ntv_tract = -1;     /* BESM6_NTV_TRACT: тракт конверта */
 static int      nat_armed = 0;      /* УИК-arming прошёл (v17) */
 static int      ntv_drum = -1;      /* барабан конверта (= LUN45_DRUM) */
+
+/* v19 (п.18.26): глобальная копия конверта для подмены буфера 76000
+ * при входе форматного конвейера МОНА-80 (kcount_pc = 01004). МОНА-
+ * МОNREAD* (12240-12254, г1r-watch31) затирает тела буфера RLE-
+ * развёрткой МОНА-80-листа ПОСЛЕ arming; границы (0o6000 на 0o12+
+ * 0o32k) МОNREAD* восстанавливает сам (И4=0o130). Подмена тел при
+ * входе на 01004 (перед исполнением команды) возвращает конверт-
+ * тела для walker'а МОНА-80-I/O. Вызывается из cu.c kcount-блока. */
+uchar           glis1r_ntv_kbuf_glob [6144];
+int             glis1r_ntv_kbuf_ready = 0;
+
+void
+glis1r_ntv_v19_patch (int abpc)
+{
+    static int v19_seen = 0;
+    int k4, b4;
+    if (! glis1r_ntv_kbuf_ready)
+        return;
+    for (k4 = 0; k4 < 1024; ++k4)
+        for (b4 = 0; b4 < 6; ++b4)
+            core [076000 + k4].w_b [b4] =
+                glis1r_ntv_kbuf_glob [k4 * 6 + b4];
+    if (! v19_seen) {
+        v19_seen = 1;
+        fprintf (stderr, "NTV v19: k12-конверт -> буфер 76000 при "
+                 "входе %05o (после МОNREAD*-развёртки)\n", abpc);
+    }
+}
 static int      ntv_tract0 = -1;    /* родная raw-зона (= LUN45_TRACT) */
 
 static void
@@ -2286,6 +2314,39 @@ lun45_native_view (int drum, int tract)
                         ntv_kbuf [k2 * 6 + b3];
             fprintf (stderr, "NTV v18: k12-конверт -> МОНА-поток "
                      "[100256..101277]\n");
+        }
+    }
+
+    /* v19 (п.18.26): глобальная копия конверта для cu.c kcount-блока
+     * (подмена буфера 76000 при входе 01004 - после МОNREAD*-развёртки
+     * МОНА-80-листа). Управляется тем же BESM6_NTV_STREAM=1. */
+    {
+        const char *ns2 = getenv ("BESM6_NTV_STREAM");
+        if (ns2 && *ns2 == '1') {
+            memcpy (glis1r_ntv_kbuf_glob, ntv_kbuf, 6144);
+            glis1r_ntv_kbuf_ready = 1;
+            fprintf (stderr, "NTV v19: глобальная копия конверта готова "
+                     "(подмена буфера при входе форматного конвейера)\n");
+        }
+    }
+
+    /* v20 (п.18.26): k12-конверт В МОНА-RLE-СПУЛ [2767+] - источник
+     * МОНА-МОNREAD* (12240-12254: xta 0(12) с И12=0o2767..2774+
+     * последовательность, развёртка в буфер 76000 - g1r-mtr23).
+     * МОНА-80-I/O (форматное чтение) обслуживается МОНА-супервизором
+     * из СВОЕГО спула (vjm 404(15) acc=0o76000 x13 - g1r-mtr19),
+     * поэтому v19-подмена буфера не дошла. BESM6_NTV_SPOOL=1
+     * включает. */
+    {
+        const char *sp = getenv ("BESM6_NTV_SPOOL");
+        if (sp && *sp == '1') {
+            int k5, b5;
+            for (k5 = 0; k5 < 1024; ++k5)
+                for (b5 = 0; b5 < 6; ++b5)
+                    core [02767 + k5].w_b [b5] =
+                        ntv_kbuf [k5 * 6 + b5];
+            fprintf (stderr, "NTV v20: k12-конверт -> МОНА-RLE-спул "
+                     "[2767..7766]\n");
         }
     }
 
