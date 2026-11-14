@@ -232,6 +232,7 @@ dbg:
             static int montrace = 0, monseen = 0;
             int dbg = dd_debug ();
             static int core_on_pc = -1, core_done = 0, core_skip = 0;
+            static int kcount_pc = -1;      /* EXECUTE-реарм [0417] (v13) */
             /* Шаг 2б (ГЛИССАДА): окно MTR настраивается через
              * BESM6_MTR_LO/BESM6_MTR_HI (восьмеричные) и длина через
              * BESM6_MTR_N (десятичная); по умолчанию 10260-12500,
@@ -250,8 +251,10 @@ dbg:
             if (core_on_pc < 0) {
                 const char *c = getenv ("BESM6_CORE_ON_PC");
                 const char *cs = getenv ("BESM6_CORE_SKIP");
+                const char *kp = getenv ("BESM6_KCOUNT_ON_PC");
                 core_on_pc = c ? (int) strtol (c, NULL, 8) : 0;
                 core_skip = cs ? atoi (cs) : 0;
+                kcount_pc = kp ? (int) strtol (kp, NULL, 8) : 0;
             }
             if (abpc >= mtr_lo && abpc <= mtr_hi) {
                 /* BESM6_MTR_SKIP: пропустить первые K срабатываний окна
@@ -271,6 +274,20 @@ dbg:
                         abpc, abright ? 'R' : 'L', reg[016],
                         uicore[abpc][0].i_opcode, uicore[abpc][0].i_addr,
                         uicore[abpc][1].i_opcode, uicore[abpc][1].i_addr);
+            /* ГЛИССАДА 14.11-26 (восстановление v13, ETAP1 18.21(в)):
+             * реарм EXECUTE-патча [0417] := 0o414 при входе форматного
+             * конвейера (BESM6_KCOUNT_ON_PC=pc, восьм.) - ротация МОНЫ
+             * затирает [0417] после первого redirect'а. */
+            if (kcount_pc > 0 && abpc == kcount_pc) {
+                static int kcnt_seen = 0;
+                core [0417].w_b [4] = 0;
+                core [0417].w_b [5] = 0414 & 0xFF;
+                if (! kcnt_seen) {
+                    kcnt_seen = 1;
+                    fprintf (stderr, "EXECUTE [0417] := 00414 at pc %05o "
+                             "(each entry)\n", abpc);
+                }
+            }
             if (dbg && ui.i_opcode == 050)   /* Э50 */
                 fprintf(stderr, "E50at %05o%c type=%05o acc=%08o%08o\n",
                         abpc, abright ? 'R' : 'L', ui.i_addr,
