@@ -2146,6 +2146,7 @@ lun45_native_view (int d45, int t45, int d46, int t46)
     /* v2 (п.18.19): заголовок k12 (12 слов conv=1, лесенка 0o64..0o24
      * + счётчик 0o22015 - эталон RUNS/run-2026-11-13f/seed-k12.bin,
      * READ OK в TSTREAD) */
+    const uint64_t word_eor = 01002004010020012ULL;
     static const uint64_t k12_header [12] = {
         022015ULL,
         (uint64_t) 064 << 42, (uint64_t) 060 << 42,
@@ -2287,16 +2288,21 @@ lun45_native_view (int d45, int t45, int d46, int t46)
         if (bnd >= 1024)
             return 0;                           /* не умещается */
         ntv_pack_iso72 (ntv_rec [exec_i + 1 + i], ws);
-        if (pos + 13 > bnd)
+        if (pos + 13 > bnd - 1)
             return 0;                           /* карта длиннее записи */
         for (j = 0; j < 13; ++j, ++pos) {
             ntv_pw (ntv_kbuf + pos * 6, ws [j]);
             ntv_kcv [pos] = 2;
         }
-        for (; pos < bnd; ++pos) {              /* филлер до границы */
+        for (; pos < bnd - 1; ++pos) {          /* филлер до EOR */
             ntv_pw (ntv_kbuf + pos * 6, filler);
             ntv_kcv [pos] = 2;
         }
+        /* v14: стадия 41 AC-контракта ("проверка на код 012", п.15.6)
+         * ждёт EOR-слово на КОНЦЕ 0o32-записи (как в h-сиде: EOR@0o45
+         * при границе 0o44) - маркер-граница на bnd, EOR на bnd-1 */
+        ntv_pw (ntv_kbuf + (bnd - 1) * 6, word_eor);
+        ntv_kcv [bnd - 1] = 2;
         ntv_pw (ntv_kbuf + bnd * 6,
                 (i == ncards - 1) ? mark_end : mark_cont);
         ntv_kcv [bnd] = 2;
