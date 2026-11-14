@@ -2073,6 +2073,9 @@ static uchar    ntv_tbuf [6144];    /* пустой лист ЛУН46 */
 static uchar    ntv_tcv [1024];
 static int      nat_enabled = -1;   /* BESM6_LUN45_NATIVE */
 static int      ntv_tract = -1;     /* BESM6_NTV_TRACT: тракт конверта */
+static int      nat_armed = 0;      /* УИК-arming прошёл (v17) */
+static int      ntv_drum = -1;      /* барабан конверта (= LUN45_DRUM) */
+static int      ntv_tract0 = -1;    /* родная raw-зона (= LUN45_TRACT) */
 
 static void
 ntv_pw (uchar *b, uint64_t v)
@@ -2249,9 +2252,22 @@ lun45_native_view (int drum, int tract)
     fprintf (stderr, "NTV: k12-конверт %d карт -> u=%02o z=%04o, "
              "[0600] := 076012\n", ncards, drum, ntv_tract);
 
-    /* v13-3а: word-pointer на начало конверта в буфере 76000 */
-    core [0600].w_b [4] = 076;
-    core [0600].w_b [5] = 012;
+    /* v13-3а: word-pointer на начало конверта в буфере 76000.
+     * v16 (п.18.23): BESM6_NTV_KCOUNT=0 ОТКЛЮЧАЕТ реарм - МОНА-
+     * конвейер данных идёт по ШТАТНОЙ raw-позиции ([0600]=0o77146,
+     * позиция карт в raw-раскладке), т.к. data-чтения ЛУН45 берут
+     * родную зону 20/04 (redirect только УИК) и перекачка raw
+     * (Э70 53) кладёт raw-слова в буфер 76000 - walker по конверт-
+     * раскладке на raw-данных давал СМЕСЬ и 201-петлю x6. */
+    {
+        const char *nk = getenv ("BESM6_NTV_KCOUNT");
+        if (! (nk && *nk == '0')) {
+            core [0600].w_b [4] = 076;
+            core [0600].w_b [5] = 012;
+        } else
+            fprintf (stderr, "NTV v16: [0600] реарм ОТКЛЮЧЁН - "
+                     "штатный raw-путь\n");
+    }
 
     /* v13-4: пустой лист на ЛУН46 - конец очереди для GIVELEXX
      * (BESM6_LUN46_DRUM/BESM6_LUN46_TRACT, как в redirect-блоке) */
@@ -2438,8 +2454,12 @@ ddio(void)
                 static int nat_done = 0;
                 if (! nat_done) {
                     nat_done = 1;
+                    ntv_drum = l45_drum;        /* v17: запомнить
+                     * родную raw-зону для подмены data-чтений */
+                    ntv_tract0 = l45_tract;
                     lun45_native_view (l45_drum, l45_tract);
                 }
+                nat_armed = 1;                  /* v17: arming прошёл */
                 if (ntv_tract < 0)
                     ntv_tract = 06;
                 u = l45_drum;
@@ -2569,6 +2589,31 @@ ddio(void)
             }
         }
 
+        /* v17 (п.18.23, ETAP1 18.22(л)): МОНА-конвейер данных читает
+         * raw-зону ПРЯМО (u=барабан 20, z=04, DD pc=00052L r016=00045
+         * - минуя ЛУН45-канал и УИК-redirect); после УИК-arming все
+         * (ntv_drum, ntv_tract0)-чтения -> конверт-тракт, иначе
+         * перекачка raw (Э70 53) кладёт дек-слова поверх конверта в
+         * буфере 76000 (двойной источник -> 201-петля x6). Трансляция
+         * (до УИК) не затрагивается. BESM6_NTV_ALL=1 включает. */
+        if (nat_armed && ntv_drum >= 0 && u == ntv_drum &&
+            zone == ntv_tract0) {
+            const char *na = getenv ("BESM6_NTV_ALL");
+            if (na && *na == '1') {
+                zone = ntv_tract;
+                fprintf (stderr, "NTV v17: data-чтение (20,%04o) -> "
+                         "конверт z=%04o\n", ntv_tract0, ntv_tract);
+            }
+        }
+        {   /* v17-диагностика: первые 200 (u, zone) после arming */
+            static int nat_diag = 0;
+            if (nat_armed && nat_diag < 200) {
+                ++nat_diag;
+                fprintf (stderr, "NTV17x: u=%02o z=%04o armed=%d "
+                         "drum=%02o t0=%04o\n", u, zone, nat_armed,
+                         ntv_drum, ntv_tract0);
+            }
+        }
         if (uil.i_reg & 8) {                // секторный обмен
                /* согласно ВЗУ и ХЛАМу, 36-й разряд означает, что номер "зоны"
                 * есть не номер тракта, а номер сектора (обмен по КУС).
