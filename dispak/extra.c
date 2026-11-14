@@ -2263,6 +2263,15 @@ lun45_native_view (int drum, int tract)
             ntv_pw (ntv_kbuf + pos * 6, filler);
             ntv_kcv [pos] = 2;
         }
+        /* v19b (п.18.31): лист-формат - счётчик слов тела на
+         * предграничной позиции (bnd-1 = марка+0o31; native53-буфер:
+         * счётчик [76043] = 0o0004 при 4 значимых словах тела записи
+         * "0TIP SAMOLETA: MIG-15"). Карта = 13 значимых слов
+         * (12 x ISO-72 + EOR) -> счётчик 0o0015. МОНА-80-I/O ЭКСТ
+         * проверяет ИНФ.СЛ записи: raw-конверт без счётчиков давал
+         * 201 x6 и пр.34 "ОШ.В ИНФ.СЛ.ЭКСТ" (СБРОС). */
+        ntv_pw (ntv_kbuf + (bnd - 1) * 6, (uint64_t) 015);
+        ntv_kcv [bnd - 1] = 2;
         ntv_pw (ntv_kbuf + bnd * 6,
                 (i == ncards - 1) ? mark_end : mark_cont);
         ntv_kcv [bnd] = 2;
