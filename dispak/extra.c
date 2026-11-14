@@ -2243,6 +2243,33 @@ ddio(void)
                              u, zone);
             }
         }
+        /* А2 13.11-17 (ГЛИССАДА, п.А3): ЛУНы 0o47-0o57 = следующие
+         * листы очереди после 46. Обход GIVELEXX многолистового
+         * задания (GLIS1R, 6 модулей) доходит до них и умирает
+         * E_CWERR (СТП 00020). BESM6_LUN_TAIL=тракт пустого листа
+         * ([11200]@0o12, "конец очереди") на барабане
+         * BESM6_LUN46_DRUM: все ЛУНы 0o47-0o57 redirected туда. */
+        {
+            static int ltail_tract = -2;
+            if (ltail_tract == -2) {
+                const char *t = getenv ("BESM6_LUN_TAIL");
+                ltail_tract = t ? (int) strtol (t, NULL, 8) : -1;
+            }
+            if (ltail_tract >= 0 && u >= 047 && u <= 057) {
+                static int l46d2 = -1;
+                int oldu = u;
+                if (l46d2 < 0) {
+                    const char *d = getenv ("BESM6_LUN46_DRUM");
+                    l46d2 = d ? (int) strtol (d, NULL, 8) : 020;
+                }
+                u = l46d2;
+                zone = ltail_tract;
+                dd = disks + u;
+                if (dd_debug ())
+                    fprintf (stderr, "LUN%02o tail redirect -> u=%02o z=%04o\n",
+                             oldu, u, zone);
+            }
+        }
         if (uil.i_opcode & 4) {         /* физобмен */
                 zone += (u - phdrum) * 040;
                 if (phys_dd.diskh) {
