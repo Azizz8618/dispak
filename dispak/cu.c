@@ -181,6 +181,10 @@ FOREVER
         nextpc = ADDR(pc + 1);
         pcm = pc | supmode;
 
+        /* Experimental PERSO linking: replace the catalog stub BEFORE it is
+         * executed, so that its left half cannot leave a stale index value. */
+        perso_patch_at(pcm);
+
         cf = cflags[pcm];
         if (!(cf & C_UNPACKED) && !right)
                 unpack(pcm);
