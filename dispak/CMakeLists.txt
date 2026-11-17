@@ -58,6 +58,7 @@ add_executable(dispak
     arith.c
     input.c
     extra.c
+    perso.c
     disk.c
     errtxt.c
     vsinput.c

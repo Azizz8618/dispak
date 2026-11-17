@@ -787,6 +787,12 @@ mtj:
                         right = abright;
                         goto dbg;
                 }
+                /* Experimental PERSO linking: replace catalog stub and retry. */
+                if (perso_patch_at(abpc)) {
+                        pc = abpc;
+                        right = 0;
+                        NEXT;
+                }
                 JMP(nextpc);
                 reg[016] = ADDR(addr + reg[ui.i_reg]);
                 reg[TRAPNREG] = ui.i_opcode - 050;

@@ -423,6 +423,7 @@ int e53 (void);
 int e60 (void);
 int e61 (void);
 int e62 (void);
+int perso_patch_at (int addr);  /* experimental PERSO stub linking */
 int e63 (void);
 int arfa_e63 (void);
 int arfa_area_unit (unsigned u);    /* лог.номер, к которому Э63 подключил область */
