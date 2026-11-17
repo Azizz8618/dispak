@@ -269,6 +269,12 @@ dbg:
                     montrace = mtr_n;   /* ре-арминг окна */
                 }
             }
+            /* А2 Фаза 2 (ГЛИССАДА): диагностический обход проверки
+             * пробельной добивки в IOCONT*. Перед сравнением 04402R
+             * подменяем младший байт сумматора кодом пробела 040. */
+            if (dbg && abpc == 04402 && getenv ("BESM6_BLANK_PAD")) {
+                acc.r = (acc.r & ~0xff) | 040;
+            }
             if (dbg && ui.i_opcode == 070)   /* Э70 */
                 fprintf(stderr, "E70at %05o%c r016=%05o uil=%o/%o uir=%o/%o\n",
                         abpc, abright ? 'R' : 'L', reg[016],
