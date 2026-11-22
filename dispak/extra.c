@@ -38,19 +38,32 @@ dd_debug (void)
 }
 
 /*
- * Functional NITI emulation layer (NITI-EMULATION-PLAN.md, stage B2).
+ * Functional NITI / ГРАФОР emulation layer (NITI-EMULATION-PLAN.md, stage B2).
  *
  * ЭК 1210/1216/1217 select the NITI plotter scheme: in the real OS ТРУБКА
  * loads the ДУДКА driver through gпнити.  The frame that ДУДКА would pass
  * to ФИЗОБМ with KUS bit 27 (е27гп) is captured through the E50 01211
- * writer below.  Registers, buffers and interrupts are not emulated: this
- * is the functional data path only, so the plot.dat format stays identical.
+ * writer below.
+ *
+ * ЭК 1200-1207 are the native ГРАФОР/ГП extract codes dispatched by Э5200
+ * (ТРУБКА).  In the K-71 build none of them performs a 64-word plotter
+ * copy: the copy loop lives in .ОБЩ2, which is excluded from that build.
+ * ЭК 1205 (ГРАФИК) only prints "ВК.Г" on the terminal via ВЫДТ1/ТВ40;
+ * 1204 writes a word to the tablo, 1206 (БОБН) requests an archive reel and
+ * 1207 (ЗАХВ) toggles the BENSON capture flag.  These handlers exist to
+ * keep the native library off the E_UNIMP path; they log state only and
+ * never produce plot.dat.  Registers, buffers and interrupts are not
+ * emulated, so the plot.dat format of the real 01211 path stays identical.
  */
 static int      niti_active;            /* a NITI scheme has been selected  */
 static unsigned niti_scheme;            /* last selected subfunction        */
 static unsigned niti_schemes;           /* number of scheme selections      */
 static unsigned niti_frames;            /* number of captured frames        */
 static unsigned niti_words;             /* number of captured words         */
+static unsigned gp_mode;                /* last 1200-1207 subfunction       */
+static unsigned gp_events[8];           /* counters for ЭК 1200..01207      */
+static unsigned gp_status;              /* ЭК 1200: "ready" status          */
+static unsigned gp_benson;              /* ЭК 1207: BENSON capture flag     */
 
 static int
 niti_debug(void)
@@ -67,6 +80,14 @@ niti_report(void)
         fprintf(stderr,
                 "NITI: summary schemes=%u frames=%u words=%u active=%d scheme=%04o\n",
                 niti_schemes, niti_frames, niti_words, niti_active, niti_scheme);
+        if (niti_debug())
+                fprintf(stderr,
+                        "GP: mode=%04o status=%u benson=%u "
+                        "events 1200..1207 = %u,%u,%u,%u,%u,%u,%u,%u\n",
+                        gp_mode, gp_status, gp_benson,
+                        gp_events[0], gp_events[1], gp_events[2],
+                        gp_events[3], gp_events[4], gp_events[5], gp_events[6],
+                        gp_events[7]);
 }
 
 static void
@@ -131,6 +152,20 @@ niti_frame(ptr txt, int nwords)
         if (niti_debug())
                 fprintf(stderr, "NITI: frame %u captured (%d words)\n",
                         niti_frames, nwords);
+}
+
+/* Record one native ГРАФОР (ЭК 1200..01207) call.  The argument is the
+ * accumulator value at the moment of the extracode; it is only logged,
+ * no data is copied to the plotter. */
+static void
+gp_event(unsigned code, unsigned arg, const char *what)
+{
+        niti_report_register();
+        gp_mode = code;
+        if (code >= 01200 && code <= 01207)
+                ++gp_events[code - 01200];
+        if (niti_debug())
+                fprintf(stderr, "GP: %04o %s arg=%06o\n", code, what, arg);
 }
 
 #define IS_DIGIT(c)     (c >= '0' && c <= '9')
@@ -1785,14 +1820,48 @@ e50(void)
                                 *dp++ = *sp ? utf8_to_gost(&sp) : GOST_SPACE;
                 }
                 return E_SUCCESS;
-        case 01206: {
-                void * h = disk_open(NDISK(acc.r), DISK_READ_ONLY);
+        case 01200:     /* КУС7Н: опрос статуса УВВ '4023' / УВВ 7 */
+                gp_event(reg[016], acc.r, "status");
+                gp_status = 1;          /* "готов" */
+                acc.r = 0;
+                return E_SUCCESS;
+        case 01201:     /* подготовка к обмену (Э1240, в K-71 заглушка НОП) */
+        case 01202:
+        case 01203:
+                gp_event(reg[016], acc.r, "prepare");
+                return E_SUCCESS;
+        case 01204:     /* Э1204: УВВ '147', запись слова на табло */
+                gp_event(reg[016], acc.r, "tablo");
+                if (niti_debug())
+                        fprintf(stderr, "GP: 1204 tablo word=%06o\n", acc.r);
+                return E_SUCCESS;
+        case 01205:     /* ГРАФИК (Э1205): печать "ВК.Г" на терминал,
+                         * НЕ вывод 64 слов на ГП (цикл в .ОБЩ2 исключён) */
+                gp_event(reg[016], acc.r, "graph");
+                if (niti_debug())
+                        fprintf(stderr, "GP: 1205 terminal message 'ВК.Г'\n");
+                return E_SUCCESS;
+        case 01206: {   /* БОБН (Э1206): запрос архивной бобины,
+                         * печать "УСТ.СР.К.N БХХХХ" на терминал */
+                void * h;
+                unsigned key = acc.r;
+                gp_event(reg[016], key, "reel");
+                /* Ключ 71717 в симуляции не проверяем. */
+                h = disk_open(NDISK(key), DISK_READ_ONLY);
                 if (h) {
                         acc.r = 1;
                         disk_close(h);
                 } else acc.r = 0;
+                if (niti_debug())
+                        fprintf(stderr, "GP: 1206 reel volume=%u found=%u\n",
+                                NDISK(key), acc.r);
         }        return E_SUCCESS;
-        case 01207:
+        case 01207:     /* ЗАХВ (Э1207): шкала ЗАХВМЛ, захват/освобождение */
+                gp_event(reg[016], acc.r, "capture");
+                gp_benson = !gp_benson;
+                if (niti_debug())
+                        fprintf(stderr, "GP: 1207 BENSON %s\n",
+                                gp_benson ? "captured" : "released");
                 return E_SUCCESS;
         case 01210:     /* NITI: select plotter scheme (ДУДКА via ТРУБКА) */
         case 01216:     /* NITI: ГП НИТИ, вариант К-71 */
