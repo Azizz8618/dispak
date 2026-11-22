@@ -16,8 +16,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <string.h>
 #include "defs.h"
 #include "disk.h"
 #include "iobuf.h"
@@ -102,12 +104,47 @@ static uint64_t du_buf_a[DU_FRAME_WORDS];
 static uint64_t du_buf_b[DU_FRAME_WORDS];
 static uint64_t du_flags;
 static unsigned du_word_idx;                 /* position in active buffer      */
-static unsigned du_init;                     /* completed 9-word initialisations*/
 static unsigned du_ack;                      /* 5-word IRQ ACK sequences        */
 static int      du_ready;                    /* Бенсон initialised             */
 static unsigned dudka_uvv_writes;
 static unsigned dudka_uvv[DUDKA_UVV_MAX];      /* device numbers             */
 ushort dudka_uvv_addr;                  /* EXT 033 address field, set in cu.c */
+static unsigned du_page_words;          /* РЕГ '240' reads on current page  */
+static unsigned du_mask_loads;          /* formerly du_init: 9-word mask tag */
+
+/* Phase 5.  There is no ГРП/МГРП/ПРП/МПРП model and no guest vector table in
+ * dispak.  DU_PROXY_EVENT is therefore a CONDITIONAL PROXY: in dispak's
+ * 1-based event scale event 18 means "обращение в закрытый лист", NOT the
+ * разряд 18 ГРП line that the guest vectors through обвнп1+30.
+ * NOT modeled: guest vector обвнп1+30 / GRP18 dispatch. */
+#define DU_PROXY_EVENT        (1u << 17)
+#define DU_KUS_GP27           (1ULL << 21) /* е27гп: 27-й разряд КУС считается
+                                            * слева, как E28 = 1<<20 above */
+#define DU_UVV_READY_E13      (1u << 12)   /* simh PI2_START, not confirmed
+                                            * against a dispak hardware spec */
+
+static unsigned du_grp18;               /* TV67/TV67A bit 18, set via ЭК 01215 */
+static unsigned du_shg;                 /* guest ШГ E37 marker              */
+static unsigned du_irq_raised;          /* eraise(proxy) calls               */
+static unsigned du_irq_taken;           /* calls that armed goahead         */
+static unsigned du_irq_proxy;           /* proxy events delivered           */
+static unsigned du_waketasks;           /* WAKETASK E37 markers             */
+static uchar    du_ring[40];            /* 0330..0377 byte ring, C mirror    */
+static unsigned du_ring_pos;
+
+/* Device model: 0.1 mm steps, 50 x 75 cm page (5000 x 7500 steps).
+ * The 0.1 mm step and the five +X/-X/+Y/-Y/pen lines come from NASA
+ * TM-76182 (Электроника-1001 analogue), not from a НИТИ interface spec. */
+#define BEN_LIMIT_X  5000
+#define BEN_LIMIT_Y  7500
+struct bench_state {
+        int x, y;
+        int pen_down;
+        int step_x, step_y;
+        int limit_x, limit_y;
+        int steps;
+};
+static struct bench_state ben = { 0, 0, 0, 1, 1, BEN_LIMIT_X, BEN_LIMIT_Y, 0 };
 
 /* Batch decks are entered by МОНИТОР-80 in user mode, so ДУДКА commands
  * would be E_PRIV there.  This opt-in hook lets a dedicated deck exercise
@@ -130,6 +167,28 @@ niti_debug(void)
         return v;
 }
 
+/* Second, human-readable output stream.  plot.dat stays byte-for-byte
+ * identical; every PEN/DECODE/IRQ line is mirrored here as well as stderr. */
+static FILE *plotlog;
+
+static void
+du_log(const char *fmt, ...)
+{
+        va_list ap;
+
+        if (!plotlog) {
+                plotlog = fopen("plot-log.txt", "w");
+                if (!plotlog)
+                        return;
+        }
+        va_start(ap, fmt);
+        vfprintf(stderr, fmt, ap);
+        va_end(ap);
+        va_start(ap, fmt);
+        vfprintf(plotlog, fmt, ap);
+        va_end(ap);
+}
+
 static void
 niti_report(void)
 {
@@ -148,7 +207,20 @@ niti_report(void)
                 du_reg34_count, du_reg240_reads, dudka_uvv_writes);
         fprintf(stderr,
                 "DUDKA: emu init=%u ack=%u frames=%u words=%u active=%u\n",
-                du_init, du_ack, du_frames, du_words, du_buf_active);
+                du_mask_loads, du_ack, du_frames, du_words, du_buf_active);
+        fprintf(stderr,
+                "DUDKA: emu page_words=%u maskloads=%u grp18=%u shg=%u\n",
+                du_page_words, du_mask_loads, du_grp18, du_shg);
+        fprintf(stderr, "DUDKA: IRQ summary raised=%u taken=%u proxy=%u\n",
+                du_irq_raised, du_irq_taken, du_irq_proxy);
+        fprintf(stderr, "DUDKA: WAKETASK E37 SHG=%u "
+                "(task wakeup NOT modeled: guest пб БПУ)\n", du_waketasks);
+        fprintf(stderr, "DUDKA: BENCH X=%d Y=%d pen=%s steps=%d [аналог NASA]\n",
+                ben.x, ben.y, ben.pen_down ? "DOWN" : "UP", ben.steps);
+        if (plotlog) {
+                fclose(plotlog);
+                plotlog = NULL;
+        }
 }
 
 static void
@@ -189,6 +261,143 @@ niti_plot_write(ptr txt, int nwords)
         fflush(plot);
 }
 
+/* Phases 2-3: physical device model and the 16-bit element decoder.
+ *
+ * HYPOTHESIS.  The BENSON wire format of the НИТИ era was not found in the
+ * available sources.  Element layout below follows the refined bit scheme
+ *   13 bits payload | 2 bits class | 1 bit extra
+ * with class = (w >> 13) & 3, payload = w & 017777, extra = (w >> 15) & 1.
+ * The action table is data so a different hypothesis can be tried by setting
+ * BESM6_NITI_DECODE=builtin|calcomp|nasa.  Every line says [hypothesis] or
+ * [аналог ...]; none of it is presented as a proven БЭСМ-6 protocol fact. */
+enum du_action {
+        ACT_NOP = 0, ACT_XPLUS, ACT_XMINUS, ACT_YPLUS, ACT_YMINUS,
+        ACT_PEN_UP, ACT_PEN_DOWN
+};
+
+struct du_decode_rule {
+        const char *name;
+        const char *tag;
+        int action[8];                  /* index = class * 2 + extra */
+};
+
+static const struct du_decode_rule du_decode_rules[] = {
+        { "builtin", "[hypothesis]", {
+                ACT_XPLUS, ACT_YPLUS, ACT_PEN_UP, ACT_PEN_DOWN,
+                ACT_NOP, ACT_NOP, ACT_NOP, ACT_NOP } },
+        { "calcomp", "[аналог CalComp]", {
+                ACT_XPLUS, ACT_XMINUS, ACT_YPLUS, ACT_YMINUS,
+                ACT_PEN_UP, ACT_PEN_DOWN, ACT_NOP, ACT_NOP } },
+        { "nasa", "[аналог NASA]", {
+                ACT_XPLUS, ACT_YPLUS, ACT_XMINUS, ACT_YMINUS,
+                ACT_PEN_DOWN, ACT_PEN_UP, ACT_NOP, ACT_NOP } },
+};
+
+static const struct du_decode_rule *
+du_decode_rule(void)
+{
+        static const struct du_decode_rule *rule;
+        const char *env;
+        unsigned i;
+
+        if (rule)
+                return rule;
+        rule = &du_decode_rules[0];
+        env = getenv("BESM6_NITI_DECODE");
+        if (env)
+                for (i = 0; i < sizeof du_decode_rules / sizeof du_decode_rules[0]; ++i)
+                        if (!strcmp(env, du_decode_rules[i].name))
+                                rule = &du_decode_rules[i];
+        du_log("DUDKA: DECODE hypothesis table=%s 13+2+1 "
+               "(13 payload / 2 class / 1 extra bits)\n", rule->name);
+        return rule;
+}
+
+static const char *const du_action_name[] = {
+        "NOP", "+X", "-X", "+Y", "-Y", "UP", "DOWN"
+};
+
+static void
+bench_move(const char *dir, int dx, int dy)
+{
+        int nx = ben.x + dx * ben.step_x;
+        int ny = ben.y + dy * ben.step_y;
+
+        if (nx < 0 || nx > ben.limit_x) {
+                du_log("DUDKA: LIMIT X\n");
+                return;
+        }
+        if (ny < 0 || ny > ben.limit_y) {
+                du_log("DUDKA: LIMIT Y\n");
+                return;
+        }
+        ben.x = nx;
+        ben.y = ny;
+        ++ben.steps;
+        du_log("DUDKA: PEN %s step %s X=%05d Y=%05d (mm %d.%d,%d.%d) "
+               "[аналог NASA]\n",
+               ben.pen_down ? "DOWN" : "UP", dir, ben.x, ben.y,
+               ben.x / 10, ben.x % 10, ben.y / 10, ben.y % 10);
+}
+
+static void
+bench_apply(int action)
+{
+        switch (action) {
+        case ACT_XPLUS:  bench_move("+X",  1,  0); break;
+        case ACT_XMINUS: bench_move("-X", -1,  0); break;
+        case ACT_YPLUS:  bench_move("+Y",  0,  1); break;
+        case ACT_YMINUS: bench_move("-Y",  0, -1); break;
+        case ACT_PEN_UP:
+                ben.pen_down = 0;
+                du_log("DUDKA: PEN UP step NONE X=%05d Y=%05d [аналог NASA]\n",
+                       ben.x, ben.y);
+                break;
+        case ACT_PEN_DOWN:
+                ben.pen_down = 1;
+                du_log("DUDKA: PEN DOWN step NONE X=%05d Y=%05d [аналог NASA]\n",
+                       ben.x, ben.y);
+                break;
+        default: break;
+        }
+}
+
+static void
+du_decode_element(unsigned w)
+{
+        const struct du_decode_rule *rule = du_decode_rule();
+        unsigned cls = (w >> 13) & 3;
+        unsigned extra = (w >> 15) & 1;
+        unsigned payload = w & 017777;
+        int action = rule->action[cls * 2 + extra];
+
+        if (action == ACT_NOP) {
+                du_log("DUDKA: DECODE unknown class=%u extra=%u payload=%06o "
+                       "[hypothesis]\n", cls, extra, payload);
+                return;
+        }
+        if (niti_debug())
+                du_log("DUDKA: DECODE class=%u extra=%u payload=%06o -> %s %s\n",
+                       cls, extra, payload, du_action_name[action], rule->tag);
+        bench_apply(action);
+}
+
+/* Each 48-bit BESM word carries three 16-bit elements (печшк3 extracts them
+ * with сда 64 / mask 0177777).  Called AFTER niti_plot_write() so plot.dat
+ * bytes can never depend on the decoder hypothesis. */
+static void
+du_decode_stream(ptr txt, int nwords)
+{
+        int i, j;
+
+        (void) du_decode_rule();
+        for (i = 0; i < nwords; ++i) {
+                uint64_t w = getword(&txt);
+                for (j = 2; j >= 0; --j)
+                        du_decode_element((unsigned)((w >> (j * 16)) & 0xffff));
+        }
+}
+
 /* ЭК 1210/1216/1217: select the NITI scheme. */
 static void
 niti_select(unsigned code)
@@ -210,6 +419,8 @@ niti_frame(ptr txt, int nwords)
         ++niti_frames;
         niti_words += nwords;
         niti_plot_write(txt, nwords);
+        du_log("DUDKA: FRAME %u words=%d\n", niti_frames, nwords);
+        du_decode_stream(txt, nwords);  /* txt is passed by value: still at start */
         if (niti_debug())
                 fprintf(stderr, "NITI: frame %u captured (%d words)\n",
                         niti_frames, nwords);
@@ -229,9 +440,10 @@ gp_event(unsigned code, unsigned arg, const char *what)
                 fprintf(stderr, "GP: %04o %s arg=%06o\n", code, what, arg);
 }
 
-/* РЕГ '34': ДУДКА пишет сюда управляющее слово через РЕГ (002) в супермоде.
- * State is kept for later B1 work; the trace is unconditional so that
- * batch tests can see it without BESM6_NITI_DEBUG. */
+/* РЕГ '34': the nine words are ПРП/ГРП masks (rukava.be:404,536), NOT commands
+ * to the Benson device.  The old "INIT" tag survives only as a sequence
+ * recogniser for the b1-* regression decks; interrupt enable is a separate
+ * TV67/TV67A event driven by ЭК 01215 (see dudka_irq_ctrl()). */
 void
 dudka_reg34_write(uint left, uint right)
 {
@@ -253,7 +465,7 @@ dudka_reg34_write(uint left, uint right)
                 fprintf(stderr, "DUDKA: REG34 full=%08o%08o\n",
                         (uint)(left & HALFW), (uint)(right & HALFW));
 
-        /* dudka.be:144-162 (init) and :254-264 (ISR ACK) share РЕГ '34'. */
+        /* dudka.be:143-162 loads masks, :253-264 sends the ISR ACK. */
         n = du_reg34_count;
         if (n >= 9 && n != last_init) {
                 for (match = 1, k = 0; k < 9; ++k)
@@ -261,10 +473,12 @@ dudka_reg34_write(uint left, uint right)
                                 match = 0;
                 if (match) {
                         last_init = n;
-                        ++du_init;
+                        ++du_mask_loads;
                         du_ready = 1;
-                        du_flags |= DU_F_E18 | DU_F_E28;
-                        fprintf(stderr, "DUDKA: INIT complete (9 words)\n");
+                        /* No DU_F_E18 here: TV67 (ЭК 01215) enables it. */
+                        du_flags |= DU_F_E28;
+                        fprintf(stderr,
+                                "DUDKA: MASK9 loaded (ПРП/ГРП)\n");
                 }
         }
         if (n >= 5 && n != last_ack) {
@@ -275,7 +489,7 @@ dudka_reg34_write(uint left, uint right)
                         last_ack = n;
                         ++du_ack;
                         du_flags |= DU_F_E28;
-                        fprintf(stderr, "DUDKA: ACK\n");
+                        fprintf(stderr, "DUDKA: MASK5 acknowledged\n");
                 }
         }
 }
@@ -313,7 +527,12 @@ dudka_reg240_read(void)
         acc.l = (uint)(word >> 24) & HALFW;
         acc.r = (uint)word & HALFW;
         ++du_reg240_reads;
+        ++du_page_words;                /* D10155-style page word counter */
         fprintf(stderr, "DUDKA: REG240 read=%08o%08o\n", acc.l, acc.r);
+        if (niti_debug())
+                fprintf(stderr, "DUDKA: REG240 page_words=%u ring=%u "
+                                "(D10155 cell NOT mapped to guest)\n",
+                        du_page_words, du_ring_pos % 40);
 
         buf = du_buf_active ? du_buf_b : du_buf_a;
         buf[du_word_idx % DU_FRAME_WORDS] = word;
@@ -327,10 +546,86 @@ dudka_reg240_read(void)
         }
 }
 
+/* Phase 5: CONDITIONAL PROXY, not a guest interrupt.  In dispak event 18
+ * means "обращение в закрытый лист"; it is not the guest разряд 18 ГРП.
+ * NOT modeled: guest vector обвнп1+30 / GRP18 dispatch, the ГРП/МГРП
+ * registers, and the ШГ E37 dispatching done by guest пб БПУ.  The proxy is
+ * gated first by the TV67/TV67A software flag, then by e53's
+ * ehandler/eenab/emask test. */
+static int
+dudka_raise_proxy(unsigned frame)
+{
+        int go;
+
+        if (!du_grp18 || !(du_flags & DU_F_E18)) {
+                du_log("DUDKA: IRQ proxy event 18 frame=%u raised=0 "
+                       "NOT modeled: guest vector обвнп1+30 / GRP18 dispatch\n",
+                       frame);
+                du_log("DUDKA: IRQ suppressed (TV67A mask cleared)\n");
+                return 0;
+        }
+        if (!ehandler || !eenab || !(emask & DU_PROXY_EVENT)) {
+                du_log("DUDKA: IRQ proxy event 18 frame=%u raised=0 "
+                       "goahead=0 (ehandler=%u eenab=%u emask18=%u) "
+                       "NOT modeled: guest vector обвнп1+30 / GRP18 dispatch\n",
+                       frame, ehandler != 0, eenab != 0,
+                       (emask & DU_PROXY_EVENT) != 0);
+                return 0;
+        }
+        go = eraise(DU_PROXY_EVENT) != 0;
+        ++du_irq_raised;
+        ++du_irq_proxy;
+        if (go)
+                ++du_irq_taken;
+        du_log("DUDKA: IRQ proxy event 18 frame=%u raised=1 goahead=%d "
+               "NOT modeled: guest vector обвнп1+30 / GRP18 dispatch\n",
+               frame, go);
+        return go;
+}
+
+/* ЭК 01215: subfunction in the LEFT accumulator half, argument in the right.
+ * 0 = TV67 (enable mask 18), 1 = TV67A (clear mask 18),
+ * 2 = raise proxy without a frame, 3 = WAKETASK E37 marker.
+ * reg[016] carries the ЭК number itself here, so it cannot also carry a
+ * subfunction.  State hooks only: no guest vector table, no GRP18 dispatch. */
+static void
+dudka_irq_ctrl(unsigned sub, unsigned arg)
+{
+        switch (sub) {
+        case 0:
+                du_grp18 = 1;
+                du_flags |= DU_F_E18;
+                du_log("DUDKA: TV67 MASK18 set (ГРП разряд 18)\n");
+                break;
+        case 1:
+                du_grp18 = 0;
+                du_flags &= ~DU_F_E18;
+                du_log("DUDKA: MASK18 cleared (TV67A, AND NOT in МГРП)\n");
+                break;
+        case 2: {
+                int go = dudka_raise_proxy(0);
+                du_log("DUDKA: IRQ raise event=18 arg=%06o goahead=%d\n",
+                       arg, go);
+                break;
+        }
+        case 3:
+                du_shg = arg ? arg : 1;
+                ++du_waketasks;
+                du_log("DUDKA: WAKETASK E37 SHG=%u "
+                       "(task wakeup NOT modeled: guest пб БПУ)\n",
+                       du_waketasks);
+                break;
+        default:
+                du_log("DUDKA: IRQ ctrl unknown sub=%u\n", sub);
+                break;
+        }
+}
+
 /* Transfer one 64-word frame to the plotter.  This is the C equivalent of
  * dudka.be:167-197 (вдудку, КУС записи + E25, пв ФИЗОБМ) with the KUS bit 27
- * (е27гп) already implied.  The frame is staged in guest-inaccessible core so
- * niti_frame()/niti_plot_write() remain the single plot.dat writer. */
+ * (е27гп) checked by the ЭК 01214 hook instead of being implied.  The frame
+ * is staged in guest-inaccessible core so niti_frame()/niti_plot_write()
+ * remain the single plot.dat writer. */
 static void
 dudka_frame_xfer(void)
 {
@@ -339,7 +634,8 @@ dudka_frame_xfer(void)
         unsigned i, j;
 
         if (!du_ready) {
-                fprintf(stderr, "DUDKA: frame ignored (INIT not complete)\n");
+                fprintf(stderr,
+                        "DUDKA: frame ignored (MASKS not loaded)\n");
                 return;
         }
         for (i = 0; i < DU_FRAME_WORDS; ++i) {
@@ -352,24 +648,31 @@ dudka_frame_xfer(void)
         txt.p_b = 0;
         niti_frame(txt, DU_FRAME_WORDS);
 
+        /* dudka.be:279-289 order: D10114 -> D10157 -> D10160 -> ШГ E37. */
         ++du_frames;
-        du_flags |= DU_F_E25 | DU_F_E48;
+        du_flags |= DU_F_E25 | DU_F_E48 | (1u << 5); /* D10114 = 1 */
         du_flags &= ~DU_F_WTC;
         du_word_idx = 0;
-        du_buf_active ^= 1;             /* dudka.be:281-286: D10160 swap */
-        fprintf(stderr, "DUDKA: buffer switched to %u\n", du_buf_active);
-        du_flags |= DU_F_E18;
-        fprintf(stderr, "DUDKA: IRQ benson frame=%u\n", du_frames);
-        (void) eraise(1u << 17);        /* event 18 (1-based) in dispak */
+        du_buf_active ^= 1;             /* D10157 ^= E1 */
+        fprintf(stderr, "DUDKA: buffer switched to %u "
+                "(D10157=%u D10160=D10161)\n",
+                du_buf_active, du_buf_active);
+        du_shg = 1;
+        ++du_waketasks;
+        du_log("DUDKA: WAKETASK E37 SHG=%u "
+               "(task wakeup NOT modeled: guest пб БПУ)\n", du_waketasks);
+        dudka_raise_proxy(du_frames);
 }
 
 /* УВВ (033): only the device numbers used by ДУДКА/ТРУБКА/БЕНСОН are
- * accepted in supervisor mode; everything else keeps the old E_PRIV path. */
+ * accepted in supervisor mode; everything else keeps the old E_PRIV path.
+ * 0166 here is УВВ (opcode 033), distinct from ЭК 0166 (opcode 050) used by
+ * the archive-volume handler; the octal log prefix keeps them apart. */
 int
 ext_plot(void)
 {
         static const unsigned devices[] = {
-                7, 0155, 0166, 0164, 0165, 04023, 0147,
+                7, 0155, 0166, 0164, 0165, 04023, 0147, 04102,
         };
         unsigned i;
 
@@ -377,11 +680,32 @@ ext_plot(void)
                 return E_PRIV;
         for (i = 0; i < sizeof devices / sizeof devices[0]; ++i) {
                 if (dudka_uvv_addr == devices[i]) {
+                        unsigned byte = acc.r & 077;
+
                         niti_report_register();
                         if (dudka_uvv_writes < DUDKA_UVV_MAX)
                                 dudka_uvv[dudka_uvv_writes] = devices[i];
                         ++dudka_uvv_writes;
                         fprintf(stderr, "DUDKA: UVV %o\n", devices[i]);
+                        if (devices[i] == 0164) {
+                                du_ring[du_ring_pos % 40] = byte;
+                                ++du_ring_pos;
+                                fprintf(stderr,
+                                        "DUDKA: UVV 164 byte=%02o ring=%u "
+                                        "(0330..0377 C mirror)\n",
+                                        byte, du_ring_pos % 40);
+                        } else if (devices[i] == 0165) {
+                                fprintf(stderr,
+                                        "DUDKA: UVV 165 byte=%02o inv=%02o "
+                                        "(нтж П377)\n", byte, byte ^ 077);
+                        } else if (devices[i] == 04102) {
+                                acc.r |= DU_UVV_READY_E13;
+                                fprintf(stderr,
+                                        "DUDKA: UVV 4102 ready E13 "
+                                        "acc=%06o (simh PI2_START, "
+                                        "dispak representation NOT verified)\n",
+                                        acc.r);
+                        }
                         return E_SUCCESS;
                 }
         }
@@ -2095,10 +2419,33 @@ e50(void)
                 txt.p_b = 0;
                 niti_frame(txt, 64);
         } return E_SUCCESS;
-        case 01213:     /* B1 test hook: ФИЗОБМ with KUS bit 27 (е27гп).
+        case 01213:     /* B1 test hook: unconditional frame transfer.
                          * Not a real ДИСПАК extracode; the guest calls пв
                          * ФИЗОБМ as a subroutine, invisible to the emulator. */
                 dudka_frame_xfer();
+                return E_SUCCESS;
+        case 01214: {   /* FISOBM hook with the КУС argument in the accumulator.
+                         * The guest subroutine пв ФИЗОБМ is not interceptable;
+                         * this is a minimal substitute, not a real ЭК. */
+                uint64_t kus = ((uint64_t)(acc.l & HALFW) << 24)
+                             | (uint64_t)(acc.r & HALFW);
+                if (!(kus & DU_KUS_GP27)) {
+                        fprintf(stderr,
+                                "DUDKA: FISOBM KUS no GP bit, ignored "
+                                "(KUS=%012llo)\n",
+                                (unsigned long long)kus);
+                        return E_SUCCESS;
+                }
+                fprintf(stderr,
+                        "DUDKA: FISOBM KUS bit27 set (KUS=%012llo) "
+                        "[test hook, guest пв ФИЗОБМ NOT modeled]\n",
+                        (unsigned long long)kus);
+                dudka_frame_xfer();
+                return E_SUCCESS;
+        }
+        case 01215:     /* Phase 5 state hook: TV67/TV67A, proxy raise,
+                         * WAKETASK, ПРП 19, vector slot (see dudka_irq_ctrl). */
+                dudka_irq_ctrl((unsigned)acc.l, (unsigned)acc.r);
                 return E_SUCCESS;
         case 01212:     /* discard print stream */
                 return E_SUCCESS;
