@@ -16,7 +16,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stdarg.h>
+#include <stdlib.h>
 #include <ctype.h>
+#include <string.h>
 #include "defs.h"
 #include "disk.h"
 #include "iobuf.h"
@@ -34,6 +37,679 @@ dd_debug (void)
     if (v < 0)
         v = getenv ("BESM6_DD_DEBUG") != NULL;
     return v;
+}
+
+/*
+ * Functional NITI / ГРАФОР emulation layer (NITI-EMULATION-PLAN.md, stage B2).
+ *
+ * ЭК 1210/1216/1217 select the NITI plotter scheme: in the real OS ТРУБКА
+ * loads the ДУДКА driver through gпнити.  The frame that ДУДКА would pass
+ * to ФИЗОБМ with KUS bit 27 (е27гп) is captured through the E50 01211
+ * writer below.
+ *
+ * ЭК 1200-1207 are the native ГРАФОР/ГП extract codes dispatched by Э5200
+ * (ТРУБКА).  In the K-71 build none of them performs a 64-word plotter
+ * copy: the copy loop lives in .ОБЩ2, which is excluded from that build.
+ * ЭК 1205 (ГРАФИК) only prints "ВК.Г" on the terminal via ВЫДТ1/ТВ40;
+ * 1204 writes a word to the tablo, 1206 (БОБН) requests an archive reel and
+ * 1207 (ЗАХВ) toggles the BENSON capture flag.  These handlers exist to
+ * keep the native library off the E_UNIMP path; they log state only and
+ * never produce plot.dat.  Registers, buffers and interrupts are not
+ * emulated, so the plot.dat format of the real 01211 path stays identical.
+ */
+static int      niti_active;            /* a NITI scheme has been selected  */
+static unsigned niti_scheme;            /* last selected subfunction        */
+static unsigned niti_schemes;           /* number of scheme selections      */
+static unsigned niti_frames;            /* number of captured frames        */
+static unsigned niti_words;             /* number of captured words         */
+static unsigned gp_mode;                /* last 1200-1207 subfunction       */
+static unsigned gp_events[8];           /* counters for ЭК 1200..01207      */
+static unsigned gp_status;              /* ЭК 1200: "ready" status          */
+static unsigned gp_benson;              /* ЭК 1207: BENSON capture flag     */
+
+/* Functional DUDKA / BENSON (НИТИ) state: B1 on top of the B2 trace layer.
+ * These are the C equivalents of the DMS cells D10113..D10164 in dudka.be.
+ * The guest vector-table replacement (обвнп1+30) is deliberately NOT emulated. */
+#define DUDKA_REG34_MAX   32
+#define DUDKA_UVV_MAX     16
+#define DU_FRAME_WORDS    64
+#define DU_REG240_WORDS   64
+/* Core address with both high bits set: unreachable by ADDR()/XADDR() in the
+ * guest, so the BENSON frame can be staged here before calling niti_frame(). */
+#define DU_CORE_SCRATCH   60000
+
+#define DU_F_E18  (1u << 0)     /* Бенсон interrupt enabled/delivered        */
+#define DU_F_E25  (1u << 1)     /* end-of-transfer bit added to КУС записи   */
+#define DU_F_E28  (1u << 2)     /* command strobe                            */
+#define DU_F_E48  (1u << 3)     /* завершение передачи (проверка E48)        */
+#define DU_F_WTC  (1u << 4)     /* 64 words collected in the active buffer   */
+
+/* Command constants from dudka.be, in BESM-6 octal: bits 28/25, 28/21,
+ * 28, D10171 and D10167.  Written in octal to match the source listing. */
+#define DU_E28E25  0000000044000000ULL
+#define DU_E28E21  0000001004000000ULL
+#define DU_E28     0000000004000000ULL
+#define DU_D10171  0000001140000000ULL
+#define DU_D10167  0000001500000040ULL
+
+static uint64_t du_reg34[DUDKA_REG34_MAX];   /* words written to РЕГ '34'      */
+static unsigned du_reg34_count;              /* total РЕГ '34' writes          */
+static unsigned du_reg240_reads;             /* total РЕГ '240' reads          */
+static uint64_t du_reg240_queue[DU_REG240_WORDS];
+static unsigned du_reg240_pos;               /* next word from Бенсон          */
+static unsigned du_frames;                   /* frames handed to ФИЗОБМ        */
+static unsigned du_words;                    /* words received from Бенсон     */
+static unsigned du_buf_active;               /* 0 = D10161 page, 1 = D10162    */
+static uint64_t du_buf_a[DU_FRAME_WORDS];
+static uint64_t du_buf_b[DU_FRAME_WORDS];
+static uint64_t du_flags;
+static unsigned du_word_idx;                 /* position in active buffer      */
+static unsigned du_ack;                      /* 5-word IRQ ACK sequences        */
+static int      du_ready;                    /* Бенсон initialised             */
+static unsigned dudka_uvv_writes;
+static unsigned dudka_uvv[DUDKA_UVV_MAX];      /* device numbers             */
+ushort dudka_uvv_addr;                  /* EXT 033 address field, set in cu.c */
+static unsigned du_page_words;          /* РЕГ '240' reads on current page  */
+static unsigned du_mask_loads;          /* formerly du_init: 9-word mask tag */
+
+/* Phase 5.  There is no ГРП/МГРП/ПРП/МПРП model and no guest vector table in
+ * dispak.  DU_PROXY_EVENT is therefore a CONDITIONAL PROXY: in dispak's
+ * 1-based event scale event 18 means "обращение в закрытый лист", NOT the
+ * разряд 18 ГРП line that the guest vectors through обвнп1+30.
+ * NOT modeled: guest vector обвнп1+30 / GRP18 dispatch. */
+#define DU_PROXY_EVENT        (1u << 17)
+#define DU_KUS_GP27           (1ULL << 21) /* е27гп: 27-й разряд КУС считается
+                                            * слева, как E28 = 1<<20 above */
+#define DU_UVV_READY_E13      (1u << 12)   /* simh PI2_START, not confirmed
+                                            * against a dispak hardware spec */
+
+static unsigned du_grp18;               /* TV67/TV67A bit 18, set via ЭК 01215 */
+static unsigned du_shg;                 /* guest ШГ E37 marker              */
+static unsigned du_irq_raised;          /* eraise(proxy) calls               */
+static unsigned du_irq_taken;           /* calls that armed goahead         */
+static unsigned du_irq_proxy;           /* proxy events delivered           */
+static unsigned du_waketasks;           /* WAKETASK E37 markers             */
+static uchar    du_ring[40];            /* 0330..0377 byte ring, C mirror    */
+static unsigned du_ring_pos;
+
+/* Device model: 0.1 mm steps, 50 x 75 cm page (5000 x 7500 steps).
+ * The 0.1 mm step and the five +X/-X/+Y/-Y/pen lines come from NASA
+ * TM-76182 (Электроника-1001 analogue), not from a НИТИ interface spec. */
+#define BEN_LIMIT_X  5000
+#define BEN_LIMIT_Y  7500
+struct bench_state {
+        int x, y;
+        int pen_down;
+        int step_x, step_y;
+        int limit_x, limit_y;
+        int steps;
+};
+static struct bench_state ben = { 0, 0, 0, 1, 1, BEN_LIMIT_X, BEN_LIMIT_Y, 0 };
+
+/* Batch decks are entered by МОНИТОР-80 in user mode, so ДУДКА commands
+ * would be E_PRIV there.  This opt-in hook lets a dedicated deck exercise
+ * the same interception path without changing any default behaviour. */
+int
+dudka_test_mode(void)
+{
+        static int v = -1;
+        if (v < 0)
+                v = getenv("BESM6_DUDKA_TEST") != NULL;
+        return v;
+}
+
+static int
+niti_debug(void)
+{
+        static int v = -1;
+        if (v < 0)
+                v = getenv("BESM6_NITI_DEBUG") != NULL;
+        return v;
+}
+
+/* Second, human-readable output stream.  plot.dat stays byte-for-byte
+ * identical; every PEN/DECODE/IRQ line is mirrored here as well as stderr. */
+static FILE *plotlog;
+
+static void
+du_log(const char *fmt, ...)
+{
+        va_list ap;
+
+        if (!plotlog) {
+                plotlog = fopen("plot-log.txt", "w");
+                if (!plotlog)
+                        return;
+        }
+        va_start(ap, fmt);
+        vfprintf(stderr, fmt, ap);
+        va_end(ap);
+        va_start(ap, fmt);
+        vfprintf(plotlog, fmt, ap);
+        va_end(ap);
+}
+
+static void
+niti_report(void)
+{
+        fprintf(stderr,
+                "NITI: summary schemes=%u frames=%u words=%u active=%d scheme=%04o\n",
+                niti_schemes, niti_frames, niti_words, niti_active, niti_scheme);
+        if (niti_debug())
+                fprintf(stderr,
+                        "GP: mode=%04o status=%u benson=%u "
+                        "events 1200..1207 = %u,%u,%u,%u,%u,%u,%u,%u\n",
+                        gp_mode, gp_status, gp_benson,
+                        gp_events[0], gp_events[1], gp_events[2],
+                        gp_events[3], gp_events[4], gp_events[5], gp_events[6],
+                        gp_events[7]);
+        fprintf(stderr, "DUDKA: summary reg34=%u reg240=%u uvv=%u\n",
+                du_reg34_count, du_reg240_reads, dudka_uvv_writes);
+        fprintf(stderr,
+                "DUDKA: emu init=%u ack=%u frames=%u words=%u active=%u\n",
+                du_mask_loads, du_ack, du_frames, du_words, du_buf_active);
+        fprintf(stderr,
+                "DUDKA: emu page_words=%u maskloads=%u grp18=%u shg=%u\n",
+                du_page_words, du_mask_loads, du_grp18, du_shg);
+        fprintf(stderr, "DUDKA: IRQ summary raised=%u taken=%u proxy=%u\n",
+                du_irq_raised, du_irq_taken, du_irq_proxy);
+        fprintf(stderr, "DUDKA: WAKETASK E37 SHG=%u "
+                "(task wakeup NOT modeled: guest пб БПУ)\n", du_waketasks);
+        fprintf(stderr, "DUDKA: BENCH X=%d Y=%d pen=%s steps=%d [аналог NASA]\n",
+                ben.x, ben.y, ben.pen_down ? "DOWN" : "UP", ben.steps);
+        if (plotlog) {
+                fclose(plotlog);
+                plotlog = NULL;
+        }
+}
+
+static void
+niti_report_register(void)
+{
+        static int registered;
+        if (!registered) {
+                atexit(niti_report);
+                registered = 1;
+        }
+}
+
+uint64_t getword(ptr *bp);      /* defined below, used by niti_plot_write */
+
+/* Write one plotter frame: octal 6-bit groups, eight numbers per line.
+ * Shared by the legacy E50 01211 handler and the NITI frame hook so that
+ * both produce the byte-for-byte identical plot.dat format. */
+static void
+niti_plot_write(ptr txt, int nwords)
+{
+        static FILE *plot;
+        int i;
+
+        if (plot == NULL) {
+                plot = fopen("plot.dat", "w");
+                if (!plot) {
+                        perror("Cannot open plot.dat\n");
+                        exit(1);
+                }
+        }
+        for (i = 0; i < nwords; ++i) {
+                unsigned long long v = getword(&txt);
+                int j;
+                for (j = 7; j >= 0; --j)
+                        fprintf(plot, "%02o ", (unsigned)((v >> (j * 6)) & 077));
+                fputc('\n', plot);
+        }
+        fflush(plot);
+}
+
+/* Phases 2-3: physical device model and the 16-bit element decoder.
+ *
+ * HYPOTHESIS.  The BENSON wire format of the НИТИ era was not found in the
+ * available sources.  Element layout below follows the refined bit scheme
+ *   13 bits payload | 2 bits class | 1 bit extra
+ * with class = (w >> 13) & 3, payload = w & 017777, extra = (w >> 15) & 1.
+ * The action table is data so a different hypothesis can be tried by setting
+ * BESM6_NITI_DECODE=builtin|calcomp|nasa.  Every line says [hypothesis] or
+ * [аналог ...]; none of it is presented as a proven БЭСМ-6 protocol fact. */
+enum du_action {
+        ACT_NOP = 0, ACT_XPLUS, ACT_XMINUS, ACT_YPLUS, ACT_YMINUS,
+        ACT_PEN_UP, ACT_PEN_DOWN
+};
+
+struct du_decode_rule {
+        const char *name;
+        const char *tag;
+        int action[8];                  /* index = class * 2 + extra */
+};
+
+static const struct du_decode_rule du_decode_rules[] = {
+        { "builtin", "[hypothesis]", {
+                ACT_XPLUS, ACT_YPLUS, ACT_PEN_UP, ACT_PEN_DOWN,
+                ACT_NOP, ACT_NOP, ACT_NOP, ACT_NOP } },
+        { "calcomp", "[аналог CalComp]", {
+                ACT_XPLUS, ACT_XMINUS, ACT_YPLUS, ACT_YMINUS,
+                ACT_PEN_UP, ACT_PEN_DOWN, ACT_NOP, ACT_NOP } },
+        { "nasa", "[аналог NASA]", {
+                ACT_XPLUS, ACT_YPLUS, ACT_XMINUS, ACT_YMINUS,
+                ACT_PEN_DOWN, ACT_PEN_UP, ACT_NOP, ACT_NOP } },
+};
+
+static const struct du_decode_rule *
+du_decode_rule(void)
+{
+        static const struct du_decode_rule *rule;
+        const char *env;
+        unsigned i;
+
+        if (rule)
+                return rule;
+        rule = &du_decode_rules[0];
+        env = getenv("BESM6_NITI_DECODE");
+        if (env)
+                for (i = 0; i < sizeof du_decode_rules / sizeof du_decode_rules[0]; ++i)
+                        if (!strcmp(env, du_decode_rules[i].name))
+                                rule = &du_decode_rules[i];
+        du_log("DUDKA: DECODE hypothesis table=%s 13+2+1 "
+               "(13 payload / 2 class / 1 extra bits)\n", rule->name);
+        return rule;
+}
+
+static const char *const du_action_name[] = {
+        "NOP", "+X", "-X", "+Y", "-Y", "UP", "DOWN"
+};
+
+static void
+bench_move(const char *dir, int dx, int dy)
+{
+        int nx = ben.x + dx * ben.step_x;
+        int ny = ben.y + dy * ben.step_y;
+
+        if (nx < 0 || nx > ben.limit_x) {
+                du_log("DUDKA: LIMIT X\n");
+                return;
+        }
+        if (ny < 0 || ny > ben.limit_y) {
+                du_log("DUDKA: LIMIT Y\n");
+                return;
+        }
+        ben.x = nx;
+        ben.y = ny;
+        ++ben.steps;
+        du_log("DUDKA: PEN %s step %s X=%05d Y=%05d (mm %d.%d,%d.%d) "
+               "[аналог NASA]\n",
+               ben.pen_down ? "DOWN" : "UP", dir, ben.x, ben.y,
+               ben.x / 10, ben.x % 10, ben.y / 10, ben.y % 10);
+}
+
+static void
+bench_apply(int action)
+{
+        switch (action) {
+        case ACT_XPLUS:  bench_move("+X",  1,  0); break;
+        case ACT_XMINUS: bench_move("-X", -1,  0); break;
+        case ACT_YPLUS:  bench_move("+Y",  0,  1); break;
+        case ACT_YMINUS: bench_move("-Y",  0, -1); break;
+        case ACT_PEN_UP:
+                ben.pen_down = 0;
+                du_log("DUDKA: PEN UP step NONE X=%05d Y=%05d [аналог NASA]\n",
+                       ben.x, ben.y);
+                break;
+        case ACT_PEN_DOWN:
+                ben.pen_down = 1;
+                du_log("DUDKA: PEN DOWN step NONE X=%05d Y=%05d [аналог NASA]\n",
+                       ben.x, ben.y);
+                break;
+        default: break;
+        }
+}
+
+static void
+du_decode_element(unsigned w)
+{
+        const struct du_decode_rule *rule = du_decode_rule();
+        unsigned cls = (w >> 13) & 3;
+        unsigned extra = (w >> 15) & 1;
+        unsigned payload = w & 017777;
+        int action = rule->action[cls * 2 + extra];
+
+        if (action == ACT_NOP) {
+                du_log("DUDKA: DECODE unknown class=%u extra=%u payload=%06o "
+                       "[hypothesis]\n", cls, extra, payload);
+                return;
+        }
+        if (niti_debug())
+                du_log("DUDKA: DECODE class=%u extra=%u payload=%06o -> %s %s\n",
+                       cls, extra, payload, du_action_name[action], rule->tag);
+        bench_apply(action);
+}
+
+/* Each 48-bit BESM word carries three 16-bit elements (печшк3 extracts them
+ * with сда 64 / mask 0177777).  Called AFTER niti_plot_write() so plot.dat
+ * bytes can never depend on the decoder hypothesis. */
+static void
+du_decode_stream(ptr txt, int nwords)
+{
+        int i, j;
+
+        (void) du_decode_rule();
+        for (i = 0; i < nwords; ++i) {
+                uint64_t w = getword(&txt);
+                for (j = 2; j >= 0; --j)
+                        du_decode_element((unsigned)((w >> (j * 16)) & 0xffff));
+        }
+}
+
+/* ЭК 1210/1216/1217: select the NITI scheme. */
+static void
+niti_select(unsigned code)
+{
+        niti_report_register();
+        niti_active = 1;
+        niti_scheme = code;
+        ++niti_schemes;
+        fprintf(stderr, "NITI: scheme %04o selected\n", code);
+}
+
+/* Capture one 64-word frame from the NITI / E50 01211 data path.
+ * A full B1 emulation would call this from the ФИЗОБМ KUS-bit-27 path;
+ * for B2 the existing E50 01211 handler is the frame source. */
+static void
+niti_frame(ptr txt, int nwords)
+{
+        niti_report_register();
+        ++niti_frames;
+        niti_words += nwords;
+        niti_plot_write(txt, nwords);
+        du_log("DUDKA: FRAME %u words=%d\n", niti_frames, nwords);
+        du_decode_stream(txt, nwords);  /* txt is passed by value: still at start */
+        if (niti_debug())
+                fprintf(stderr, "NITI: frame %u captured (%d words)\n",
+                        niti_frames, nwords);
+}
+
+/* Record one native ГРАФОР (ЭК 1200..01207) call.  The argument is the
+ * accumulator value at the moment of the extracode; it is only logged,
+ * no data is copied to the plotter. */
+static void
+gp_event(unsigned code, unsigned arg, const char *what)
+{
+        niti_report_register();
+        gp_mode = code;
+        if (code >= 01200 && code <= 01207)
+                ++gp_events[code - 01200];
+        if (niti_debug())
+                fprintf(stderr, "GP: %04o %s arg=%06o\n", code, what, arg);
+}
+
+/* РЕГ '34': the nine words are ПРП/ГРП masks (rukava.be:404,536), NOT commands
+ * to the Benson device.  The old "INIT" tag survives only as a sequence
+ * recogniser for the b1-* regression decks; interrupt enable is a separate
+ * TV67/TV67A event driven by ЭК 01215 (see dudka_irq_ctrl()). */
+void
+dudka_reg34_write(uint left, uint right)
+{
+        static const uint64_t init_seq[9] = {
+                DU_E28E25, 0, DU_E28, 0, DU_E28E21, 0, DU_E28, 0, DU_D10171
+        };
+        static const uint64_t ack_seq[5] = {
+                DU_D10167, 0, DU_E28E25, 0, DU_D10171
+        };
+        static unsigned last_init, last_ack;
+        uint64_t word = ((uint64_t)(left & HALFW) << 24) | (right & HALFW);
+        unsigned n, k, match;
+
+        niti_report_register();
+        du_reg34[du_reg34_count % DUDKA_REG34_MAX] = word;
+        ++du_reg34_count;
+        fprintf(stderr, "DUDKA: REG34 word=%08o\n", (uint)(right & HALFW));
+        if (niti_debug())
+                fprintf(stderr, "DUDKA: REG34 full=%08o%08o\n",
+                        (uint)(left & HALFW), (uint)(right & HALFW));
+
+        /* dudka.be:143-162 loads masks, :253-264 sends the ISR ACK. */
+        n = du_reg34_count;
+        if (n >= 9 && n != last_init) {
+                for (match = 1, k = 0; k < 9; ++k)
+                        if (du_reg34[(n - 9 + k) % DUDKA_REG34_MAX] != init_seq[k])
+                                match = 0;
+                if (match) {
+                        last_init = n;
+                        ++du_mask_loads;
+                        du_ready = 1;
+                        /* No DU_F_E18 here: TV67 (ЭК 01215) enables it. */
+                        du_flags |= DU_F_E28;
+                        fprintf(stderr,
+                                "DUDKA: MASK9 loaded (ПРП/ГРП)\n");
+                }
+        }
+        if (n >= 5 && n != last_ack) {
+                for (match = 1, k = 0; k < 5; ++k)
+                        if (du_reg34[(n - 5 + k) % DUDKA_REG34_MAX] != ack_seq[k])
+                                match = 0;
+                if (match) {
+                        last_ack = n;
+                        ++du_ack;
+                        du_flags |= DU_F_E28;
+                        fprintf(stderr, "DUDKA: MASK5 acknowledged\n");
+                }
+        }
+}
+
+/* РЕГ '240': ДУДКА reads one word from Бенсон on every interrupt.  A bounded
+ * deterministic queue stands in for the real device; words are assembled into
+ * the active 64-word buffer (D10160) exactly as dudka.be:266-278 does. */
+void
+dudka_reg240_read(void)
+{
+        static int queue_ready;
+        uint64_t word, *buf;
+        unsigned i;
+
+        niti_report_register();
+        if (!queue_ready) {
+                /* Keep the first two B2 trace values so the old d2 deck stays
+                 * byte-compatible; the rest carry deterministic frame data. */
+                du_reg240_queue[0] = DU_D10171;
+                du_reg240_queue[1] = DU_D10167;
+                for (i = 2; i < DU_REG240_WORDS; ++i)
+                        du_reg240_queue[i] =
+                                ((uint64_t)(i & 077) << 42) |
+                                ((uint64_t)((i * 7 + 1) & 077) << 36) |
+                                ((uint64_t)((i * 3 + 2) & 077) << 30) |
+                                ((uint64_t)((i + 011) & 077) << 24) |
+                                ((uint64_t)((i * 5 + 3) & 077) << 18) |
+                                ((uint64_t)((i * 11 + 4) & 077) << 12) |
+                                ((uint64_t)((i * 13 + 5) & 077) << 6) |
+                                (uint64_t)(i & 077);
+                queue_ready = 1;
+        }
+        word = du_reg240_queue[du_reg240_pos % DU_REG240_WORDS];
+        ++du_reg240_pos;
+        acc.l = (uint)(word >> 24) & HALFW;
+        acc.r = (uint)word & HALFW;
+        ++du_reg240_reads;
+        ++du_page_words;                /* D10155-style page word counter */
+        fprintf(stderr, "DUDKA: REG240 read=%08o%08o\n", acc.l, acc.r);
+        if (niti_debug())
+                fprintf(stderr, "DUDKA: REG240 page_words=%u ring=%u "
+                                "(D10155 cell NOT mapped to guest)\n",
+                        du_page_words, du_ring_pos % 40);
+
+        buf = du_buf_active ? du_buf_b : du_buf_a;
+        buf[du_word_idx % DU_FRAME_WORDS] = word;
+        ++du_word_idx;
+        ++du_words;
+        if (du_word_idx >= DU_FRAME_WORDS && !(du_flags & DU_F_WTC)) {
+                du_flags |= DU_F_WTC;
+                if (niti_debug())
+                        fprintf(stderr, "DUDKA: buffer %u complete\n",
+                                du_buf_active);
+        }
+}
+
+/* Phase 5: CONDITIONAL PROXY, not a guest interrupt.  In dispak event 18
+ * means "обращение в закрытый лист"; it is not the guest разряд 18 ГРП.
+ * NOT modeled: guest vector обвнп1+30 / GRP18 dispatch, the ГРП/МГРП
+ * registers, and the ШГ E37 dispatching done by guest пб БПУ.  The proxy is
+ * gated first by the TV67/TV67A software flag, then by e53's
+ * ehandler/eenab/emask test. */
+static int
+dudka_raise_proxy(unsigned frame)
+{
+        int go;
+
+        if (!du_grp18 || !(du_flags & DU_F_E18)) {
+                du_log("DUDKA: IRQ proxy event 18 frame=%u raised=0 "
+                       "NOT modeled: guest vector обвнп1+30 / GRP18 dispatch\n",
+                       frame);
+                du_log("DUDKA: IRQ suppressed (TV67A mask cleared)\n");
+                return 0;
+        }
+        if (!ehandler || !eenab || !(emask & DU_PROXY_EVENT)) {
+                du_log("DUDKA: IRQ proxy event 18 frame=%u raised=0 "
+                       "goahead=0 (ehandler=%u eenab=%u emask18=%u) "
+                       "NOT modeled: guest vector обвнп1+30 / GRP18 dispatch\n",
+                       frame, ehandler != 0, eenab != 0,
+                       (emask & DU_PROXY_EVENT) != 0);
+                return 0;
+        }
+        go = eraise(DU_PROXY_EVENT) != 0;
+        ++du_irq_raised;
+        ++du_irq_proxy;
+        if (go)
+                ++du_irq_taken;
+        du_log("DUDKA: IRQ proxy event 18 frame=%u raised=1 goahead=%d "
+               "NOT modeled: guest vector обвнп1+30 / GRP18 dispatch\n",
+               frame, go);
+        return go;
+}
+
+/* ЭК 01215: subfunction in the LEFT accumulator half, argument in the right.
+ * 0 = TV67 (enable mask 18), 1 = TV67A (clear mask 18),
+ * 2 = raise proxy without a frame, 3 = WAKETASK E37 marker.
+ * reg[016] carries the ЭК number itself here, so it cannot also carry a
+ * subfunction.  State hooks only: no guest vector table, no GRP18 dispatch. */
+static void
+dudka_irq_ctrl(unsigned sub, unsigned arg)
+{
+        switch (sub) {
+        case 0:
+                du_grp18 = 1;
+                du_flags |= DU_F_E18;
+                du_log("DUDKA: TV67 MASK18 set (ГРП разряд 18)\n");
+                break;
+        case 1:
+                du_grp18 = 0;
+                du_flags &= ~DU_F_E18;
+                du_log("DUDKA: MASK18 cleared (TV67A, AND NOT in МГРП)\n");
+                break;
+        case 2: {
+                int go = dudka_raise_proxy(0);
+                du_log("DUDKA: IRQ raise event=18 arg=%06o goahead=%d\n",
+                       arg, go);
+                break;
+        }
+        case 3:
+                du_shg = arg ? arg : 1;
+                ++du_waketasks;
+                du_log("DUDKA: WAKETASK E37 SHG=%u "
+                       "(task wakeup NOT modeled: guest пб БПУ)\n",
+                       du_waketasks);
+                break;
+        default:
+                du_log("DUDKA: IRQ ctrl unknown sub=%u\n", sub);
+                break;
+        }
+}
+
+/* Transfer one 64-word frame to the plotter.  This is the C equivalent of
+ * dudka.be:167-197 (вдудку, КУС записи + E25, пв ФИЗОБМ) with the KUS bit 27
+ * (е27гп) checked by the ЭК 01214 hook instead of being implied.  The frame
+ * is staged in guest-inaccessible core so niti_frame()/niti_plot_write()
+ * remain the single plot.dat writer. */
+static void
+dudka_frame_xfer(void)
+{
+        uint64_t *buf = du_buf_active ? du_buf_b : du_buf_a;
+        ptr txt;
+        unsigned i, j;
+
+        if (!du_ready) {
+                fprintf(stderr,
+                        "DUDKA: frame ignored (MASKS not loaded)\n");
+                return;
+        }
+        for (i = 0; i < DU_FRAME_WORDS; ++i) {
+                uint64_t w = buf[i];
+                for (j = 0; j < 6; ++j)
+                        core[DU_CORE_SCRATCH + i].w_b[j] =
+                                (uchar)((w >> ((5 - j) * 8)) & 0377);
+        }
+        txt.p_w = DU_CORE_SCRATCH;
+        txt.p_b = 0;
+        niti_frame(txt, DU_FRAME_WORDS);
+
+        /* dudka.be:279-289 order: D10114 -> D10157 -> D10160 -> ШГ E37. */
+        ++du_frames;
+        du_flags |= DU_F_E25 | DU_F_E48 | (1u << 5); /* D10114 = 1 */
+        du_flags &= ~DU_F_WTC;
+        du_word_idx = 0;
+        du_buf_active ^= 1;             /* D10157 ^= E1 */
+        fprintf(stderr, "DUDKA: buffer switched to %u "
+                "(D10157=%u D10160=D10161)\n",
+                du_buf_active, du_buf_active);
+        du_shg = 1;
+        ++du_waketasks;
+        du_log("DUDKA: WAKETASK E37 SHG=%u "
+               "(task wakeup NOT modeled: guest пб БПУ)\n", du_waketasks);
+        dudka_raise_proxy(du_frames);
+}
+
+/* УВВ (033): only the device numbers used by ДУДКА/ТРУБКА/БЕНСОН are
+ * accepted in supervisor mode; everything else keeps the old E_PRIV path.
+ * 0166 here is УВВ (opcode 033), distinct from ЭК 0166 (opcode 050) used by
+ * the archive-volume handler; the octal log prefix keeps them apart. */
+int
+ext_plot(void)
+{
+        static const unsigned devices[] = {
+                7, 0155, 0166, 0164, 0165, 04023, 0147, 04102,
+        };
+        unsigned i;
+
+        if (!supmode && !dudka_test_mode())
+                return E_PRIV;
+        for (i = 0; i < sizeof devices / sizeof devices[0]; ++i) {
+                if (dudka_uvv_addr == devices[i]) {
+                        unsigned byte = acc.r & 077;
+
+                        niti_report_register();
+                        if (dudka_uvv_writes < DUDKA_UVV_MAX)
+                                dudka_uvv[dudka_uvv_writes] = devices[i];
+                        ++dudka_uvv_writes;
+                        fprintf(stderr, "DUDKA: UVV %o\n", devices[i]);
+                        if (devices[i] == 0164) {
+                                du_ring[du_ring_pos % 40] = byte;
+                                ++du_ring_pos;
+                                fprintf(stderr,
+                                        "DUDKA: UVV 164 byte=%02o ring=%u "
+                                        "(0330..0377 C mirror)\n",
+                                        byte, du_ring_pos % 40);
+                        } else if (devices[i] == 0165) {
+                                fprintf(stderr,
+                                        "DUDKA: UVV 165 byte=%02o inv=%02o "
+                                        "(нтж П377)\n", byte, byte ^ 077);
+                        } else if (devices[i] == 04102) {
+                                acc.r |= DU_UVV_READY_E13;
+                                fprintf(stderr,
+                                        "DUDKA: UVV 4102 ready E13 "
+                                        "acc=%06o (simh PI2_START, "
+                                        "dispak representation NOT verified)\n",
+                                        acc.r);
+                        }
+                        return E_SUCCESS;
+                }
+        }
+        return E_PRIV;
 }
 
 #define IS_DIGIT(c)     (c >= '0' && c <= '9')
@@ -1688,40 +2364,89 @@ e50(void)
                                 *dp++ = *sp ? utf8_to_gost(&sp) : GOST_SPACE;
                 }
                 return E_SUCCESS;
-        case 01206: {
-                void * h = disk_open(NDISK(acc.r), DISK_READ_ONLY);
+        case 01200:     /* КУС7Н: опрос статуса УВВ '4023' / УВВ 7 */
+                gp_event(reg[016], acc.r, "status");
+                gp_status = 1;          /* "готов" */
+                acc.r = 0;
+                return E_SUCCESS;
+        case 01201:     /* подготовка к обмену (Э1240, в K-71 заглушка НОП) */
+        case 01202:
+        case 01203:
+                gp_event(reg[016], acc.r, "prepare");
+                return E_SUCCESS;
+        case 01204:     /* Э1204: УВВ '147', запись слова на табло */
+                gp_event(reg[016], acc.r, "tablo");
+                if (niti_debug())
+                        fprintf(stderr, "GP: 1204 tablo word=%06o\n", acc.r);
+                return E_SUCCESS;
+        case 01205:     /* ГРАФИК (Э1205): печать "ВК.Г" на терминал,
+                         * НЕ вывод 64 слов на ГП (цикл в .ОБЩ2 исключён) */
+                gp_event(reg[016], acc.r, "graph");
+                if (niti_debug())
+                        fprintf(stderr, "GP: 1205 terminal message 'ВК.Г'\n");
+                return E_SUCCESS;
+        case 01206: {   /* БОБН (Э1206): запрос архивной бобины,
+                         * печать "УСТ.СР.К.N БХХХХ" на терминал */
+                void * h;
+                unsigned key = acc.r;
+                gp_event(reg[016], key, "reel");
+                /* Ключ 71717 в симуляции не проверяем. */
+                h = disk_open(NDISK(key), DISK_READ_ONLY);
                 if (h) {
                         acc.r = 1;
                         disk_close(h);
                 } else acc.r = 0;
+                if (niti_debug())
+                        fprintf(stderr, "GP: 1206 reel volume=%u found=%u\n",
+                                NDISK(key), acc.r);
         }        return E_SUCCESS;
-        case 01207:
+        case 01207:     /* ЗАХВ (Э1207): шкала ЗАХВМЛ, захват/освобождение */
+                gp_event(reg[016], acc.r, "capture");
+                gp_benson = !gp_benson;
+                if (niti_debug())
+                        fprintf(stderr, "GP: 1207 BENSON %s\n",
+                                gp_benson ? "captured" : "released");
+                return E_SUCCESS;
+        case 01210:     /* NITI: select plotter scheme (ДУДКА via ТРУБКА) */
+        case 01216:     /* NITI: ГП НИТИ, вариант К-71 */
+        case 01217:     /* NITI: ГП НИТИ, вариант К-71 */
+                niti_select(reg[016]);
                 return E_SUCCESS;
         case 01211:     /* plotter output (64 words starting from the address on acc) */
-               if (reg[3] == 071717) {
-                static FILE * plot = NULL;
-                int i;
+               if (reg[3] == 071717 || niti_active) {
                 ptr txt;
                 txt.p_w = ADDR(acc.r);
                 txt.p_b = 0;
-                if (plot == NULL) {
-                        plot = fopen("plot.dat", "w");
-                        if (!plot) {
-                                perror("Cannot open plot.dat\n");
-                                exit(1);
-                        }
-                }
-                for (i = 0; i < 64; ++i) {
-                        unsigned long long v = getword(&txt);
-                        int j;
-                        for (j = 7; j >= 0; --j) {
-                                int val = (v >> (j*6)) & 077;
-                                fprintf(plot, "%02o ", val);
-                        }
-                        fputc('\n', plot);
-                }
-                fflush(plot);
+                niti_frame(txt, 64);
         } return E_SUCCESS;
+        case 01213:     /* B1 test hook: unconditional frame transfer.
+                         * Not a real ДИСПАК extracode; the guest calls пв
+                         * ФИЗОБМ as a subroutine, invisible to the emulator. */
+                dudka_frame_xfer();
+                return E_SUCCESS;
+        case 01214: {   /* FISOBM hook with the КУС argument in the accumulator.
+                         * The guest subroutine пв ФИЗОБМ is not interceptable;
+                         * this is a minimal substitute, not a real ЭК. */
+                uint64_t kus = ((uint64_t)(acc.l & HALFW) << 24)
+                             | (uint64_t)(acc.r & HALFW);
+                if (!(kus & DU_KUS_GP27)) {
+                        fprintf(stderr,
+                                "DUDKA: FISOBM KUS no GP bit, ignored "
+                                "(KUS=%012llo)\n",
+                                (unsigned long long)kus);
+                        return E_SUCCESS;
+                }
+                fprintf(stderr,
+                        "DUDKA: FISOBM KUS bit27 set (KUS=%012llo) "
+                        "[test hook, guest пв ФИЗОБМ NOT modeled]\n",
+                        (unsigned long long)kus);
+                dudka_frame_xfer();
+                return E_SUCCESS;
+        }
+        case 01215:     /* Phase 5 state hook: TV67/TV67A, proxy raise,
+                         * WAKETASK, ПРП 19, vector slot (see dudka_irq_ctrl). */
+                dudka_irq_ctrl((unsigned)acc.l, (unsigned)acc.r);
+                return E_SUCCESS;
         case 01212:     /* discard print stream */
                 return E_SUCCESS;
         case 07700:     /* set alarm */
@@ -2059,39 +2784,24 @@ put_check_words(ushort u, ushort zone, ushort addr, int copy2_req) {
         STORE(t, 017);  /* checksum */
 }
 
-/* А2 13.11-18 (ГЛИССАДА, п.18.18(1)-(2)): конверт-вид родной зоны УИР.
- * Возвращает 1, если развёртка построена и записана, 0 - если данные
- * в зоне ещё не полны (попытка повторяется на следующем Э70 ЛУН45).
- *
- * ДИАГНОЗ (g1r-native2..10): к моменту старта задачи зона УИР 20/04
- * содержит КОНВЕРТ-ГОЛОВУ МОНЫ (121 запись: заголовок + записи спула,
- *структура рабочая - разбор задачи шёл по ней), но записи данных
- * лежат в RLE (байт 0o200+N = N пробелов, EOR-байт 0o12 инлайн),
- * а конвейер READ(5) формирует MONCARD из РАЗВЁРНУТОГО ISO - RLE-байты
- * отбрасываются, записи пустеют, 201-петля (п.18.6б). Замена листа
- * k12-конвертом (g1r-native10) даёт "ИСПОРЧЕН РЕКОРД POINT 00012":
- * слово 0o12 моны-конверта не [11201]. РЕШЕНИЕ: РАЗВЁРТКА - заголовок
- * и записи до *EXECUTE остаются как есть, записи данных после
- * *EXECUTE (включая *END FILE) переписываются в развёрнутый ISO-72
- * (12 слов по 6 байт + слово EOR 0o1002004010020012, как в k12/seed-h),
- * слово конца потока сохраняется. */
+/* Объединение двух линий разработки: A2 13.11-18 (развёртка родной зоны УИР)
+ * и A2 14.11-26 (восстановление v13-v15 + v19-подмена буфера 76000). */
 #define NTV_MAXREC  700
 #define NTV_MAXLEN  96
 
 static uchar  ntv_nbuf [6144];   /* слова родной зоны */
 static uchar  ntv_ncv  [1024];
 static char   ntv_rec  [NTV_MAXREC] [NTV_MAXLEN];
-static uchar  ntv_kbuf [6144];   /* конверт-вид */
+static uchar  ntv_kbuf [6144];   /* конверт: 1024 слова x 6 байт (BE) */
 static uchar  ntv_kcv  [1024];
 static uchar  ntv_tbuf [6144];   /* пустой лист ЛУН46 */
 static uchar  ntv_tcv  [1024];
-static int    ntv_active = 0;    /* 1 = конверт k12-формата построен на
-                                    отдельном тракте: все fetch'и задачи
-                                    (М16=45, чтение целой зоны) после
-                                    построения redirect'ятся на него */
-static int    nat_armed = 0;     /* 1 = УИК-проверка пройдена (старт задачи): */
-static int    nat_enabled = -1;  /* BESM6_LUN45_NATIVE кэш */
-static int    ntv_tract = -1;    /* BESM6_NTV_TRACT: тракт конверта (06) */
+static int    ntv_active = 0;   /* 1 = конверт k12-формата построен на отдельном тракте */
+static int    nat_armed = 0;    /* УИК-arming прошёл (v17) */
+static int    nat_enabled = -1; /* BESM6_LUN45_NATIVE кэш */
+static int    ntv_tract = -1;   /* BESM6_NTV_TRACT: тракт конверта */
+static int    ntv_drum = -1;    /* барабан конверта (= LUN45_DRUM) */
+static int    ntv_tract0 = -1;  /* родная raw-зона (= LUN45_TRACT) */
 
 static uint64_t
 ntv_gw (const uchar *b)
@@ -2101,6 +2811,29 @@ ntv_gw (const uchar *b)
     for (i = 0; i < 6; ++i)
         v = (v << 8) | b [i];
     return v;
+}
+
+/* v19 (п.18.26): глобальная копия конверта для подмены буфера 76000
+ * при входе форматного конвейера МОНА-80 (kcount_pc = 01004). */
+uchar           glis1r_ntv_kbuf_glob [6144];
+int             glis1r_ntv_kbuf_ready = 0;
+
+void
+glis1r_ntv_v19_patch (int abpc)
+{
+    static int v19_seen = 0;
+    int k4, b4;
+    if (! glis1r_ntv_kbuf_ready)
+        return;
+    for (k4 = 0; k4 < 1024; ++k4)
+        for (b4 = 0; b4 < 6; ++b4)
+            core [076000 + k4].w_b [b4] =
+                glis1r_ntv_kbuf_glob [k4 * 6 + b4];
+    if (! v19_seen) {
+        v19_seen = 1;
+        fprintf (stderr, "NTV v19: k12-конверт -> буфер 76000 при "
+                 "входе %05o (после МОNREAD*-развёртки)\n", abpc);
+    }
 }
 
 static void
@@ -2116,24 +2849,51 @@ ntv_pw (uchar *b, uint64_t v)
 /* карта -> 13 слов конверта: 12 слов ISO-72 (по 6 байт) + EOR-слово
  * 0o1002004010020012 (эталон [М1+211], k12/seed-h; п.18.6б - MONCARD
  * ест развёрнутый ISO, не RLE) */
+static uchar
+ntv_iso (uchar c)
+{
+    if (c >= 'a' && c <= 'z')
+        c -= 32;
+    switch (c) {                    /* МОНА-ISO спец-символы (mk_drum_seed) */
+    case '!': return 041;
+    case '"': return 042;
+    case '#': return 023;
+    case '$': return 044;
+    case '%': return 045;
+    case '&': return 046;
+    case '\'': return 047;
+    case '(': return 050;
+    case ')': return 051;
+    case '*': return 052;
+    case '+': return 053;
+    case ',': return 054;
+    case '-': return 055;
+    case '.': return 056;
+    case '/': return 057;
+    case ':': return 072;
+    case ';': return 073;
+    case '<': return 074;
+    case '=': return 075;
+    case '>': return 076;
+    case '?': return 077;
+    case '@': return 060;
+    }
+    return c;                       /* буквы/цифры/пробел = ASCII */
+}
 static int
-ntv_pack_iso72 (const char *text, uint64_t *out)
+ntv_pack_iso72 (const char *text, uint64_t *out, uint64_t eor)
 {
     uchar cs [72];
     int i, j, n = strlen (text);
-    for (i = 0; i < 72; ++i) {
-        uchar c = (i < n) ? (uchar) text [i] : (uchar) 040;
-        if (c >= 'a' && c <= 'z')
-            c -= 32;
-        cs [i] = c;
-    }
+    for (i = 0; i < 72; ++i)
+        cs [i] = (i < n) ? ntv_iso ((uchar) text [i]) : 040;
     for (i = 0; i < 12; ++i) {
         uint64_t v = 0;
         for (j = 0; j < 6; ++j)
             v = (v << 8) | cs [i * 6 + j];
         out [i] = v;
     }
-    out [12] = 0x20202020200aULL;    /* WORD_EOR: 5 пробелов + 0o12 */
+    out [12] = eor;    /* WORD_EOR задаётся вызывающей стороной */
     return 13;
 }
 
@@ -2146,7 +2906,6 @@ lun45_native_view (int d45, int t45, int d46, int t46)
     /* v2 (п.18.19): заголовок k12 (12 слов conv=1, лесенка 0o64..0o24
      * + счётчик 0o22015 - эталон RUNS/run-2026-11-13f/seed-k12.bin,
      * READ OK в TSTREAD) */
-    const uint64_t word_eor = 01002004010020012ULL;
     static const uint64_t k12_header [12] = {
         022015ULL,
         (uint64_t) 064 << 42, (uint64_t) 060 << 42,
@@ -2160,7 +2919,6 @@ lun45_native_view (int d45, int t45, int d46, int t46)
      * "READ OK в TSTREAD"; v13/v14 использовали 0x202020202020) */
     const uint64_t headkey = (uint64_t) 034 << 42;  /* ключ-вес головы */
     int i, j, nrec = 0, exec_i = -1, endf_i = -1, ncards, pos, bnd;
-    int rstart [NTV_MAXREC], rend [NTV_MAXREC];
     uint64_t zone_id;
 
     if (d45 < 0)
@@ -2176,7 +2934,7 @@ lun45_native_view (int d45, int t45, int d46, int t46)
      *    текст не входят; конец потока = слово 0o7760000000000012. */
     {
         char cur [NTV_MAXLEN];
-        int cl = 0, wstart = 0;
+        int cl = 0;
         for (i = 0; i < 1024; ++i) {
             uint64_t w = ntv_gw (ntv_nbuf + i * 6);
             int eor = 0;
@@ -2201,8 +2959,6 @@ lun45_native_view (int d45, int t45, int d46, int t46)
             if (eor) {
                 cur [cl] = 0;
                 if (nrec < NTV_MAXREC) {
-                    rstart [nrec] = wstart;
-                    rend [nrec] = i;
                     if (cl > 0)
                         strcpy (ntv_rec [nrec], cur);
                     else
@@ -2210,7 +2966,6 @@ lun45_native_view (int d45, int t45, int d46, int t46)
                     ++nrec;
                 }
                 cl = 0;
-                wstart = i + 1;
             }
         }
     }
@@ -2289,7 +3044,7 @@ lun45_native_view (int d45, int t45, int d46, int t46)
         bnd = 012 + 032 * (i + 1);              /* граница за записью */
         if (bnd >= 1024)
             return 0;                           /* не умещается */
-        ntv_pack_iso72 (ntv_rec [exec_i + 1 + i], ws);
+        ntv_pack_iso72 (ntv_rec [exec_i + 1 + i], ws, 0x20202020200aULL);
         if (pos + 13 > bnd - 1)
             return 0;                           /* карта длиннее записи */
         for (j = 0; j < 13; ++j, ++pos) {
@@ -2370,6 +3125,17 @@ lun45_native_view (int d45, int t45, int d46, int t46)
     fprintf (stderr, ")\n");
     ntv_active = 1;
     return 1;
+}
+
+/* v19-совместимая заглушка: в слитой ветке оставлена реализация
+ * lun45_native_view() из main (декод родной зоны 20/04). Полная
+ * v16-v21-ветка из master здесь не сохранена. */
+static int
+lun45_native_view_v19 (int drum, int tract)
+{
+    (void) drum;
+    (void) tract;
+    return 0;
 }
 
 int
@@ -2564,6 +3330,33 @@ ddio(void)
                         }
                     }
                 }
+            /* А2 14.11-26 (v13-v15, восстановление): NATIVE-путь -
+             * k12-конверт из колоды на BESM6_NTV_TRACT при первом
+             * redirect; УИК-проверка (М16=75504) на конверт-тракт
+             * (v7, ETAP1 18.20(б)); остальные чтения u=45 - родная
+             * зона l45_tract (дек RLE, данные МОНА берёт 1:1). */
+            if (nat_enabled < 0) {
+                const char *ne = getenv ("BESM6_LUN45_NATIVE");
+                nat_enabled = (ne && *ne && *ne != '0') ? 1 : 0;
+            }
+            if (nat_enabled && reg [016] == 075504) {
+                static int nat_done = 0;
+                if (! nat_done) {
+                    nat_done = 1;
+                    ntv_drum = l45_drum;        /* v17: запомнить
+                     * родную raw-зону для подмены data-чтений */
+                    ntv_tract0 = l45_tract;
+                    lun45_native_view_v19 (l45_drum, l45_tract);
+                }
+                nat_armed = 1;                  /* v17: arming прошёл */
+                if (ntv_tract < 0)
+                    ntv_tract = 06;
+                u = l45_drum;
+                zone = ntv_tract;       /* УИК-проверка -> конверт */
+                dd = disks + u;
+                fprintf (stderr, "NTV v7: УИК-проверка -> u=%02o "
+                         "z=%04o (конверт в буфер 76000)\n", u, zone);
+            } else {
                 u = l45_drum;
                 zone = l45_tract;
                 dd = disks + u;     /* dd уже назначен по старому u */
@@ -2571,6 +3364,7 @@ ddio(void)
                     fprintf (stderr, "LUN45 redirect -> u=%02o z=%04o\n",
                              u, zone);
             }
+        }
         }
         /* А2 13.11-10 (ГЛИССАДА, п.18.11(3)): ЛУН46 = следующий лист
          * очереди спула. После исчерпания листа ЛУН45 GIVELEXX (05355)
@@ -2791,6 +3585,31 @@ ddio(void)
                      (uil.i_opcode & 010) ? "RD" : "WR",
                      pc, right ? 'R' : 'L', reg [016],
                      (uil.i_addr & 03700) << 4, w);
+        }
+        /* v17 (п.18.23, ETAP1 18.22(л)): МОНА-конвейер данных читает
+         * raw-зону ПРЯМО (u=барабан 20, z=04, DD pc=00052L r016=00045
+         * - минуя ЛУН45-канал и УИК-redirect); после УИК-arming все
+         * (ntv_drum, ntv_tract0)-чтения -> конверт-тракт, иначе
+         * перекачка raw (Э70 53) кладёт дек-слова поверх конверта в
+         * буфере 76000 (двойной источник -> 201-петля x6). Трансляция
+         * (до УИК) не затрагивается. BESM6_NTV_ALL=1 включает. */
+        if (nat_armed && ntv_drum >= 0 && u == ntv_drum &&
+            zone == ntv_tract0) {
+            const char *na = getenv ("BESM6_NTV_ALL");
+            if (na && *na == '1') {
+                zone = ntv_tract;
+                fprintf (stderr, "NTV v17: data-чтение (20,%04o) -> "
+                         "конверт z=%04o\n", ntv_tract0, ntv_tract);
+            }
+        }
+        {   /* v17-диагностика: первые 200 (u, zone) после arming */
+            static int nat_diag = 0;
+            if (nat_armed && nat_diag < 200) {
+                ++nat_diag;
+                fprintf (stderr, "NTV17x: u=%02o z=%04o armed=%d "
+                         "drum=%02o t0=%04o\n", u, zone, nat_armed,
+                         ntv_drum, ntv_tract0);
+            }
         }
         if (uil.i_reg & 8) {                // секторный обмен
                /* согласно ВЗУ и ХЛАМу, 36-й разряд означает, что номер "зоны"

@@ -16,7 +16,7 @@
 extern int      add(), aax(), aex(), arx(),
 		avx(), aox(), b6div(),  mul(),  apx(), aux(), acx(),
 		anx(), epx(), emx(),  asx(), yta(),
-		priv();
+		priv(), ext_plot();
 
 optab_t optab[] = {
 	{"atx", 0,      I_ATX,  0, },                           /* 000 */
@@ -46,7 +46,7 @@ optab_t optab[] = {
 	{"rte", 0,      I_RTE,  F_NAI | F_LG, },                /* 030 */
 	{"yta", 0,      I_YTA,  F_NAI },                        /* 031 */
 	{"ext", priv,   0,      F_PRIV, },                      /* 032 */
-	{"ext", priv,   0,      F_PRIV, },                      /* 033 */
+	{"ext", ext_plot, 0,    F_PRIV, },                      /* 033 */
 	{"e+n", epx,    0,      F_NAI | F_AR| F_MG, },          /* 034 */
 	{"e-n", emx,    0,      F_NAI | F_AR| F_MG, },          /* 035 */
 	{"asn", asx,    0,      F_NAI | F_LG, },                /* 036 */
