@@ -39,6 +39,14 @@ long aumodes[] = {
 
 extern ulong icnt;
 
+/* ДУДКА command tracing: state and handlers live in extra.c next to the B2
+ * NITI report so that one atexit summary covers both layers. */
+extern void dudka_reg34_write(uint left, uint right);
+extern void dudka_reg240_read(void);
+extern int ext_plot(void);
+extern int dudka_test_mode(void);
+extern ushort dudka_uvv_addr;
+
 void
 unpack(unsigned pc)
 {
@@ -749,9 +757,17 @@ mtj:
                 reg[0] = 0;
                 NEXT;
         case I_MOD:
-                if (supmode)
+                if (supmode || dudka_test_mode()) {
+                        if (addr == 034) {      /* РЕГ '34' write */
+                                dudka_reg34_write(acc.l, acc.r);
+                                NEXT;
+                        }
+                        if (addr == 0240) {     /* РЕГ '240' read */
+                                dudka_reg240_read();
+                                NEXT;
+                        }
                         NEXT;
-                else
+                } else
                         ABORT(E_PRIV);
         case I_IRET:
                 if (!supmode)
@@ -935,6 +951,10 @@ errchk:
                 } else if (op.o_flags & F_NAI)
                         GET_NAI_OP;
 
+                /* EXT 033 (УВВ) has no argument fetch: pass its address
+                 * field to ext_plot(), which decides by device number. */
+                if (ui.i_opcode == 033)
+                        dudka_uvv_addr = addr;
                 err = (*op.o_impl)();
                 if (err)
                         ABORT(err);

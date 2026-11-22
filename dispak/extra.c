@@ -65,6 +65,30 @@ static unsigned gp_events[8];           /* counters for ЭК 1200..01207      */
 static unsigned gp_status;              /* ЭК 1200: "ready" status          */
 static unsigned gp_benson;              /* ЭК 1207: BENSON capture flag     */
 
+/* Trace-only interception of the ДУДКА command path (B1 step 1).  No buffers,
+ * interrupts or status emulation: only the commands issued by ДУДКА are
+ * counted and printed, so plot.dat still comes exclusively from ЭК 01211. */
+#define DUDKA_REG34_MAX 32
+#define DUDKA_UVV_MAX   16
+static uint64_t dudka_reg34[DUDKA_REG34_MAX];  /* accumulator words written  */
+static unsigned dudka_reg34_writes;
+static unsigned dudka_reg240_reads;
+static unsigned dudka_uvv_writes;
+static unsigned dudka_uvv[DUDKA_UVV_MAX];      /* device numbers             */
+ushort dudka_uvv_addr;                  /* EXT 033 address field, set in cu.c */
+
+/* Batch decks are entered by МОНИТОР-80 in user mode, so ДУДКА commands
+ * would be E_PRIV there.  This opt-in hook lets a dedicated deck exercise
+ * the same interception path without changing any default behaviour. */
+int
+dudka_test_mode(void)
+{
+        static int v = -1;
+        if (v < 0)
+                v = getenv("BESM6_DUDKA_TEST") != NULL;
+        return v;
+}
+
 static int
 niti_debug(void)
 {
@@ -88,6 +112,8 @@ niti_report(void)
                         gp_events[0], gp_events[1], gp_events[2],
                         gp_events[3], gp_events[4], gp_events[5], gp_events[6],
                         gp_events[7]);
+        fprintf(stderr, "DUDKA: summary reg34=%u reg240=%u uvv=%u\n",
+                dudka_reg34_writes, dudka_reg240_reads, dudka_uvv_writes);
 }
 
 static void
@@ -166,6 +192,68 @@ gp_event(unsigned code, unsigned arg, const char *what)
                 ++gp_events[code - 01200];
         if (niti_debug())
                 fprintf(stderr, "GP: %04o %s arg=%06o\n", code, what, arg);
+}
+
+/* РЕГ '34': ДУДКА пишет сюда управляющее слово через РЕГ (002) в супермоде.
+ * State is kept for later B1 work; the trace is unconditional so that
+ * batch tests can see it without BESM6_NITI_DEBUG. */
+void
+dudka_reg34_write(uint left, uint right)
+{
+        uint64_t word = ((uint64_t)(left & HALFW) << 24) | (right & HALFW);
+
+        niti_report_register();
+        if (dudka_reg34_writes < DUDKA_REG34_MAX)
+                dudka_reg34[dudka_reg34_writes] = word;
+        ++dudka_reg34_writes;
+        fprintf(stderr, "DUDKA: REG34 word=%08o\n", (uint)(right & HALFW));
+        if (niti_debug())
+                fprintf(stderr, "DUDKA: REG34 full=%08o%08o\n",
+                        (uint)(left & HALFW), (uint)(right & HALFW));
+}
+
+/* РЕГ '240': ДУДКА читает здесь слово состояния ГП.  Serve deterministic
+ * D10171/D10167 values from the reference deck. */
+void
+dudka_reg240_read(void)
+{
+        static const uint64_t words[] = {
+                01140000000ULL,         /* D10171 */
+                01500000040ULL,         /* D10167 */
+        };
+        uint64_t word;
+
+        niti_report_register();
+        word = words[dudka_reg240_reads % (sizeof words / sizeof words[0])];
+        acc.l = (uint)(word >> 24) & HALFW;
+        acc.r = (uint)word & HALFW;
+        ++dudka_reg240_reads;
+        fprintf(stderr, "DUDKA: REG240 read=%08o%08o\n", acc.l, acc.r);
+}
+
+/* УВВ (033): only the device numbers used by ДУДКА/ТРУБКА/БЕНСОН are
+ * accepted in supervisor mode; everything else keeps the old E_PRIV path. */
+int
+ext_plot(void)
+{
+        static const unsigned devices[] = {
+                7, 0155, 0166, 0164, 0165, 04023, 0147,
+        };
+        unsigned i;
+
+        if (!supmode && !dudka_test_mode())
+                return E_PRIV;
+        for (i = 0; i < sizeof devices / sizeof devices[0]; ++i) {
+                if (dudka_uvv_addr == devices[i]) {
+                        niti_report_register();
+                        if (dudka_uvv_writes < DUDKA_UVV_MAX)
+                                dudka_uvv[dudka_uvv_writes] = devices[i];
+                        ++dudka_uvv_writes;
+                        fprintf(stderr, "DUDKA: UVV %o\n", devices[i]);
+                        return E_SUCCESS;
+                }
+        }
+        return E_PRIV;
 }
 
 #define IS_DIGIT(c)     (c >= '0' && c <= '9')
