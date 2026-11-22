@@ -66,6 +66,8 @@ add_executable(dispak
     encoding.c
     getopt.c
     "${DEBUG_C}"
+    plotter.cpp
+    plotter_bridge.cpp
 )
 target_link_libraries(dispak PUBLIC m)
 target_compile_options(dispak PRIVATE

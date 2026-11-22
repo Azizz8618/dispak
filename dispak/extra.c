@@ -25,8 +25,11 @@
 #include "iobuf.h"
 #include "gost10859.h"
 #include "encoding.h"
+#include "plotter_bridge.h"
 
 #define SMALL_DISKS()   (getenv("BESM6_SMALL_DISKS") || disk_emulate_725)
+
+static int du_plot_keep(void);  /* used by the atexit report below */
 
 /* Отладочная трасса этапа 1 проекта ГЛИССАДА-6: дампы Э70/дд_обмена
  * в stderr.  Включается переменной окружения BESM6_DD_DEBUG. */
@@ -217,6 +220,8 @@ niti_report(void)
                 "(task wakeup NOT modeled: guest пб БПУ)\n", du_waketasks);
         fprintf(stderr, "DUDKA: BENCH X=%d Y=%d pen=%s steps=%d [аналог NASA]\n",
                 ben.x, ben.y, ben.pen_down ? "DOWN" : "UP", ben.steps);
+        /* Dubna writes calcomp.svg (and calcomp.out only with keep). */
+        dubna_plot_finish(du_plot_keep());
         if (plotlog) {
                 fclose(plotlog);
                 plotlog = NULL;
@@ -261,15 +266,21 @@ niti_plot_write(ptr txt, int nwords)
         fflush(plot);
 }
 
-/* Phases 2-3: physical device model and the 16-bit element decoder.
+/* Decoders for a captured NITI frame.
  *
- * HYPOTHESIS.  The BENSON wire format of the НИТИ era was not found in the
- * available sources.  Element layout below follows the refined bit scheme
- *   13 bits payload | 2 bits class | 1 bit extra
- * with class = (w >> 13) & 3, payload = w & 017777, extra = (w >> 15) & 1.
- * The action table is data so a different hypothesis can be tried by setting
- * BESM6_NITI_DECODE=builtin|calcomp|nasa.  Every line says [hypothesis] or
- * [аналог ...]; none of it is presented as a proven БЭСМ-6 protocol fact. */
+ * PROVEN path (default, BESM6_NITI_DECODE=proven|dubna): a 48-bit BESM word
+ * is six 8-bit bytes, byte k = (word >> (40 - 8*k)) & 0xff, k=0..5.  This is
+ * the byte order of Dubna's BytePointer (memory.h:77-108).  The bytes go to
+ * the proven Calcomp back end of Dubna's plotter.cpp via the C bridge.  The
+ * six Calcomp step bits (01=-X, 02=+X, 04=pen up, 010=pen down, 020=+Y,
+ * 040=-Y) are fixed by the Dubna golden tests, but applying them to the
+ * dispak bench is still [аналог CalComp], not a proven БЕНСОН/НИТИ protocol.
+ *
+ * HYPOTHESIS path (BESM6_NITI_DECODE=builtin|calcomp|nasa), retained only
+ * for A/B comparison: 13 bits payload | 2 bits class | 1 bit extra, with
+ * class = (w >> 13) & 3, payload = w & 017777, extra = (w >> 15) & 1.
+ * Every line it logs says [hypothesis] or [аналог ...]; none of it is a
+ * proven БЭСМ-6 protocol fact. */
 enum du_action {
         ACT_NOP = 0, ACT_XPLUS, ACT_XMINUS, ACT_YPLUS, ACT_YMINUS,
         ACT_PEN_UP, ACT_PEN_DOWN
@@ -313,12 +324,72 @@ du_decode_rule(void)
         return rule;
 }
 
+/* The proven path is the default; the old 13+2+1 table stays selectable
+ * for A/B comparison only. */
+static int
+du_decode_proven(void)
+{
+        static int v = -1;
+        const char *env;
+
+        if (v < 0) {
+                v = 1;
+                env = getenv("BESM6_NITI_DECODE");
+                if (env && (!strcmp(env, "builtin") || !strcmp(env, "calcomp") ||
+                            !strcmp(env, "nasa")))
+                        v = 0;
+        }
+        return v;
+}
+
+/* Plotter device for the bridge: 0 Calcomp (default), 1 Tektronix,
+ * 2 Watanabe, -1 no bytes.  Any device is an analogue, never a claim about
+ * the real БЕНСОН device. */
+static int
+du_plot_device(void)
+{
+        static int initialized;
+        static int device;
+        const char *env;
+
+        if (!initialized) {
+                initialized = 1;
+                device = 0;
+                env = getenv("BESM6_DUBNA_PLOT_DEVICE");
+                if (env) {
+                        if (!strcmp(env, "tektronix"))
+                                device = 1;
+                        else if (!strcmp(env, "watanabe"))
+                                device = 2;
+                        else if (!strcmp(env, "off"))
+                                device = -1;
+                }
+        }
+        return device;
+}
+
+static const char *const du_plot_device_name[] = {
+        "calcomp", "tektronix", "watanabe"
+};
+
+static unsigned du_plot_bytes;          /* bytes forwarded to the bridge */
+
+/* Dubna writes the raw *.out file only when temporary files are kept. */
+static int
+du_plot_keep(void)
+{
+        static int v = -1;
+        if (v < 0)
+                v = getenv("BESM6_DUBNA_PLOT_KEEP") != NULL;
+        return v;
+}
+
 static const char *const du_action_name[] = {
         "NOP", "+X", "-X", "+Y", "-Y", "UP", "DOWN"
 };
 
 static void
-bench_move(const char *dir, int dx, int dy)
+bench_move(const char *dir, int dx, int dy, const char *tag)
 {
         int nx = ben.x + dx * ben.step_x;
         int ny = ben.y + dy * ben.step_y;
@@ -334,20 +405,19 @@ bench_move(const char *dir, int dx, int dy)
         ben.x = nx;
         ben.y = ny;
         ++ben.steps;
-        du_log("DUDKA: PEN %s step %s X=%05d Y=%05d (mm %d.%d,%d.%d) "
-               "[аналог NASA]\n",
+        du_log("DUDKA: PEN %s step %s X=%05d Y=%05d (mm %d.%d,%d.%d) %s\n",
                ben.pen_down ? "DOWN" : "UP", dir, ben.x, ben.y,
-               ben.x / 10, ben.x % 10, ben.y / 10, ben.y % 10);
+               ben.x / 10, ben.x % 10, ben.y / 10, ben.y % 10, tag);
 }
 
 static void
 bench_apply(int action)
 {
         switch (action) {
-        case ACT_XPLUS:  bench_move("+X",  1,  0); break;
-        case ACT_XMINUS: bench_move("-X", -1,  0); break;
-        case ACT_YPLUS:  bench_move("+Y",  0,  1); break;
-        case ACT_YMINUS: bench_move("-Y",  0, -1); break;
+        case ACT_XPLUS:  bench_move("+X",  1,  0, "[аналог NASA]"); break;
+        case ACT_XMINUS: bench_move("-X", -1,  0, "[аналог NASA]"); break;
+        case ACT_YPLUS:  bench_move("+Y",  0,  1, "[аналог NASA]"); break;
+        case ACT_YMINUS: bench_move("-Y",  0, -1, "[аналог NASA]"); break;
         case ACT_PEN_UP:
                 ben.pen_down = 0;
                 du_log("DUDKA: PEN UP step NONE X=%05d Y=%05d [аналог NASA]\n",
@@ -360,6 +430,47 @@ bench_apply(int action)
                 break;
         default: break;
         }
+}
+
+/* Proven Calcomp command-byte bit assignments, used only for the human-
+ * readable PEN log.  This is [аналог CalComp], not a БЕНСОН protocol claim. */
+static void
+du_decode_calcomp_byte(unsigned char byte)
+{
+        char dir[8];
+        int dx = 0, dy = 0;
+
+        if (byte & 01)
+                dx = -1;
+        if (byte & 02)
+                dx = 1;
+        if (byte & 04) {
+                ben.pen_down = 0;
+                du_log("DUDKA: PEN UP step NONE X=%05d Y=%05d [аналог CalComp]\n",
+                       ben.x, ben.y);
+        }
+        if (byte & 010) {
+                ben.pen_down = 1;
+                du_log("DUDKA: PEN DOWN step NONE X=%05d Y=%05d [аналог CalComp]\n",
+                       ben.x, ben.y);
+        }
+        if (byte & 020)
+                dy = 1;
+        if (byte & 040)
+                dy = -1;
+        if (!dx && !dy)
+                return;
+
+        dir[0] = '\0';
+        if (dx > 0)
+                strcpy(dir, "+X");
+        else if (dx < 0)
+                strcpy(dir, "-X");
+        if (dy > 0)
+                strcat(dir, "+Y");
+        else if (dy < 0)
+                strcat(dir, "-Y");
+        bench_move(dir, dx, dy, "[аналог CalComp]");
 }
 
 static void
@@ -382,11 +493,11 @@ du_decode_element(unsigned w)
         bench_apply(action);
 }
 
-/* Each 48-bit BESM word carries three 16-bit elements (печшк3 extracts them
- * with сда 64 / mask 0177777).  Called AFTER niti_plot_write() so plot.dat
- * bytes can never depend on the decoder hypothesis. */
+/* [hypothesis] Old 13+2+1 decoder, kept for A/B comparison only.  Each
+ * 48-bit word was read as three 16-bit elements (печшк3 with сда 64 /
+ * mask 0177777).  Never used by the default proven path. */
 static void
-du_decode_stream(ptr txt, int nwords)
+du_decode_stream_hypothesis(ptr txt, int nwords)
 {
         int i, j;
 
@@ -395,6 +506,40 @@ du_decode_stream(ptr txt, int nwords)
                 uint64_t w = getword(&txt);
                 for (j = 2; j >= 0; --j)
                         du_decode_element((unsigned)((w >> (j * 16)) & 0xffff));
+        }
+}
+
+/* Proven extraction: six 8-bit bytes per 48-bit word, in BytePointer order.
+ * The bytes are forwarded to the Dubna plotter bridge; the raw plot.dat has
+ * already been written by niti_plot_write(), so its SHA never depends on
+ * this decoder or on the bridge. */
+static void
+du_decode_stream(ptr txt, int nwords)
+{
+        static int logged;
+        int device;
+        int i, k;
+
+        if (!du_decode_proven()) {
+                du_decode_stream_hypothesis(txt, nwords);
+                return;
+        }
+        if (!logged) {
+                logged = 1;
+                du_log("DUDKA: DECODE proven 6 bytes/word BytePointer order "
+                       "[аналог CalComp]\n");
+        }
+        device = du_plot_device();
+        for (i = 0; i < nwords; ++i) {
+                uint64_t w = getword(&txt);
+                for (k = 0; k < 6; ++k) {
+                        unsigned char byte =
+                                (unsigned char)((w >> (40 - 8 * k)) & 0xff);
+                        if (device >= 0)
+                                dubna_plot_put(device, byte);
+                        ++du_plot_bytes;
+                        du_decode_calcomp_byte(byte);
+                }
         }
 }
 
@@ -421,6 +566,10 @@ niti_frame(ptr txt, int nwords)
         niti_plot_write(txt, nwords);
         du_log("DUDKA: FRAME %u words=%d\n", niti_frames, nwords);
         du_decode_stream(txt, nwords);  /* txt is passed by value: still at start */
+        du_log("DUDKA: DUBNA-PLOT device=%s bytes=%u page=%u %s\n",
+               du_plot_device() >= 0 ? du_plot_device_name[du_plot_device()] : "off",
+               du_plot_bytes, niti_frames,
+               du_decode_proven() ? "[аналог CalComp]" : "[hypothesis]");
         if (niti_debug())
                 fprintf(stderr, "NITI: frame %u captured (%d words)\n",
                         niti_frames, nwords);
