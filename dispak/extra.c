@@ -65,14 +65,46 @@ static unsigned gp_events[8];           /* counters for ЭК 1200..01207      */
 static unsigned gp_status;              /* ЭК 1200: "ready" status          */
 static unsigned gp_benson;              /* ЭК 1207: BENSON capture flag     */
 
-/* Trace-only interception of the ДУДКА command path (B1 step 1).  No buffers,
- * interrupts or status emulation: only the commands issued by ДУДКА are
- * counted and printed, so plot.dat still comes exclusively from ЭК 01211. */
-#define DUDKA_REG34_MAX 32
-#define DUDKA_UVV_MAX   16
-static uint64_t dudka_reg34[DUDKA_REG34_MAX];  /* accumulator words written  */
-static unsigned dudka_reg34_writes;
-static unsigned dudka_reg240_reads;
+/* Functional DUDKA / BENSON (НИТИ) state: B1 on top of the B2 trace layer.
+ * These are the C equivalents of the DMS cells D10113..D10164 in dudka.be.
+ * The guest vector-table replacement (обвнп1+30) is deliberately NOT emulated. */
+#define DUDKA_REG34_MAX   32
+#define DUDKA_UVV_MAX     16
+#define DU_FRAME_WORDS    64
+#define DU_REG240_WORDS   64
+/* Core address with both high bits set: unreachable by ADDR()/XADDR() in the
+ * guest, so the BENSON frame can be staged here before calling niti_frame(). */
+#define DU_CORE_SCRATCH   60000
+
+#define DU_F_E18  (1u << 0)     /* Бенсон interrupt enabled/delivered        */
+#define DU_F_E25  (1u << 1)     /* end-of-transfer bit added to КУС записи   */
+#define DU_F_E28  (1u << 2)     /* command strobe                            */
+#define DU_F_E48  (1u << 3)     /* завершение передачи (проверка E48)        */
+#define DU_F_WTC  (1u << 4)     /* 64 words collected in the active buffer   */
+
+/* Command constants from dudka.be, in BESM-6 octal: bits 28/25, 28/21,
+ * 28, D10171 and D10167.  Written in octal to match the source listing. */
+#define DU_E28E25  0000000044000000ULL
+#define DU_E28E21  0000001004000000ULL
+#define DU_E28     0000000004000000ULL
+#define DU_D10171  0000001140000000ULL
+#define DU_D10167  0000001500000040ULL
+
+static uint64_t du_reg34[DUDKA_REG34_MAX];   /* words written to РЕГ '34'      */
+static unsigned du_reg34_count;              /* total РЕГ '34' writes          */
+static unsigned du_reg240_reads;             /* total РЕГ '240' reads          */
+static uint64_t du_reg240_queue[DU_REG240_WORDS];
+static unsigned du_reg240_pos;               /* next word from Бенсон          */
+static unsigned du_frames;                   /* frames handed to ФИЗОБМ        */
+static unsigned du_words;                    /* words received from Бенсон     */
+static unsigned du_buf_active;               /* 0 = D10161 page, 1 = D10162    */
+static uint64_t du_buf_a[DU_FRAME_WORDS];
+static uint64_t du_buf_b[DU_FRAME_WORDS];
+static uint64_t du_flags;
+static unsigned du_word_idx;                 /* position in active buffer      */
+static unsigned du_init;                     /* completed 9-word initialisations*/
+static unsigned du_ack;                      /* 5-word IRQ ACK sequences        */
+static int      du_ready;                    /* Бенсон initialised             */
 static unsigned dudka_uvv_writes;
 static unsigned dudka_uvv[DUDKA_UVV_MAX];      /* device numbers             */
 ushort dudka_uvv_addr;                  /* EXT 033 address field, set in cu.c */
@@ -113,7 +145,10 @@ niti_report(void)
                         gp_events[3], gp_events[4], gp_events[5], gp_events[6],
                         gp_events[7]);
         fprintf(stderr, "DUDKA: summary reg34=%u reg240=%u uvv=%u\n",
-                dudka_reg34_writes, dudka_reg240_reads, dudka_uvv_writes);
+                du_reg34_count, du_reg240_reads, dudka_uvv_writes);
+        fprintf(stderr,
+                "DUDKA: emu init=%u ack=%u frames=%u words=%u active=%u\n",
+                du_init, du_ack, du_frames, du_words, du_buf_active);
 }
 
 static void
@@ -200,35 +235,132 @@ gp_event(unsigned code, unsigned arg, const char *what)
 void
 dudka_reg34_write(uint left, uint right)
 {
+        static const uint64_t init_seq[9] = {
+                DU_E28E25, 0, DU_E28, 0, DU_E28E21, 0, DU_E28, 0, DU_D10171
+        };
+        static const uint64_t ack_seq[5] = {
+                DU_D10167, 0, DU_E28E25, 0, DU_D10171
+        };
+        static unsigned last_init, last_ack;
         uint64_t word = ((uint64_t)(left & HALFW) << 24) | (right & HALFW);
+        unsigned n, k, match;
 
         niti_report_register();
-        if (dudka_reg34_writes < DUDKA_REG34_MAX)
-                dudka_reg34[dudka_reg34_writes] = word;
-        ++dudka_reg34_writes;
+        du_reg34[du_reg34_count % DUDKA_REG34_MAX] = word;
+        ++du_reg34_count;
         fprintf(stderr, "DUDKA: REG34 word=%08o\n", (uint)(right & HALFW));
         if (niti_debug())
                 fprintf(stderr, "DUDKA: REG34 full=%08o%08o\n",
                         (uint)(left & HALFW), (uint)(right & HALFW));
+
+        /* dudka.be:144-162 (init) and :254-264 (ISR ACK) share РЕГ '34'. */
+        n = du_reg34_count;
+        if (n >= 9 && n != last_init) {
+                for (match = 1, k = 0; k < 9; ++k)
+                        if (du_reg34[(n - 9 + k) % DUDKA_REG34_MAX] != init_seq[k])
+                                match = 0;
+                if (match) {
+                        last_init = n;
+                        ++du_init;
+                        du_ready = 1;
+                        du_flags |= DU_F_E18 | DU_F_E28;
+                        fprintf(stderr, "DUDKA: INIT complete (9 words)\n");
+                }
+        }
+        if (n >= 5 && n != last_ack) {
+                for (match = 1, k = 0; k < 5; ++k)
+                        if (du_reg34[(n - 5 + k) % DUDKA_REG34_MAX] != ack_seq[k])
+                                match = 0;
+                if (match) {
+                        last_ack = n;
+                        ++du_ack;
+                        du_flags |= DU_F_E28;
+                        fprintf(stderr, "DUDKA: ACK\n");
+                }
+        }
 }
 
-/* РЕГ '240': ДУДКА читает здесь слово состояния ГП.  Serve deterministic
- * D10171/D10167 values from the reference deck. */
+/* РЕГ '240': ДУДКА reads one word from Бенсон on every interrupt.  A bounded
+ * deterministic queue stands in for the real device; words are assembled into
+ * the active 64-word buffer (D10160) exactly as dudka.be:266-278 does. */
 void
 dudka_reg240_read(void)
 {
-        static const uint64_t words[] = {
-                01140000000ULL,         /* D10171 */
-                01500000040ULL,         /* D10167 */
-        };
-        uint64_t word;
+        static int queue_ready;
+        uint64_t word, *buf;
+        unsigned i;
 
         niti_report_register();
-        word = words[dudka_reg240_reads % (sizeof words / sizeof words[0])];
+        if (!queue_ready) {
+                /* Keep the first two B2 trace values so the old d2 deck stays
+                 * byte-compatible; the rest carry deterministic frame data. */
+                du_reg240_queue[0] = DU_D10171;
+                du_reg240_queue[1] = DU_D10167;
+                for (i = 2; i < DU_REG240_WORDS; ++i)
+                        du_reg240_queue[i] =
+                                ((uint64_t)(i & 077) << 42) |
+                                ((uint64_t)((i * 7 + 1) & 077) << 36) |
+                                ((uint64_t)((i * 3 + 2) & 077) << 30) |
+                                ((uint64_t)((i + 011) & 077) << 24) |
+                                ((uint64_t)((i * 5 + 3) & 077) << 18) |
+                                ((uint64_t)((i * 11 + 4) & 077) << 12) |
+                                ((uint64_t)((i * 13 + 5) & 077) << 6) |
+                                (uint64_t)(i & 077);
+                queue_ready = 1;
+        }
+        word = du_reg240_queue[du_reg240_pos % DU_REG240_WORDS];
+        ++du_reg240_pos;
         acc.l = (uint)(word >> 24) & HALFW;
         acc.r = (uint)word & HALFW;
-        ++dudka_reg240_reads;
+        ++du_reg240_reads;
         fprintf(stderr, "DUDKA: REG240 read=%08o%08o\n", acc.l, acc.r);
+
+        buf = du_buf_active ? du_buf_b : du_buf_a;
+        buf[du_word_idx % DU_FRAME_WORDS] = word;
+        ++du_word_idx;
+        ++du_words;
+        if (du_word_idx >= DU_FRAME_WORDS && !(du_flags & DU_F_WTC)) {
+                du_flags |= DU_F_WTC;
+                if (niti_debug())
+                        fprintf(stderr, "DUDKA: buffer %u complete\n",
+                                du_buf_active);
+        }
+}
+
+/* Transfer one 64-word frame to the plotter.  This is the C equivalent of
+ * dudka.be:167-197 (вдудку, КУС записи + E25, пв ФИЗОБМ) with the KUS bit 27
+ * (е27гп) already implied.  The frame is staged in guest-inaccessible core so
+ * niti_frame()/niti_plot_write() remain the single plot.dat writer. */
+static void
+dudka_frame_xfer(void)
+{
+        uint64_t *buf = du_buf_active ? du_buf_b : du_buf_a;
+        ptr txt;
+        unsigned i, j;
+
+        if (!du_ready) {
+                fprintf(stderr, "DUDKA: frame ignored (INIT not complete)\n");
+                return;
+        }
+        for (i = 0; i < DU_FRAME_WORDS; ++i) {
+                uint64_t w = buf[i];
+                for (j = 0; j < 6; ++j)
+                        core[DU_CORE_SCRATCH + i].w_b[j] =
+                                (uchar)((w >> ((5 - j) * 8)) & 0377);
+        }
+        txt.p_w = DU_CORE_SCRATCH;
+        txt.p_b = 0;
+        niti_frame(txt, DU_FRAME_WORDS);
+
+        ++du_frames;
+        du_flags |= DU_F_E25 | DU_F_E48;
+        du_flags &= ~DU_F_WTC;
+        du_word_idx = 0;
+        du_buf_active ^= 1;             /* dudka.be:281-286: D10160 swap */
+        fprintf(stderr, "DUDKA: buffer switched to %u\n", du_buf_active);
+        du_flags |= DU_F_E18;
+        fprintf(stderr, "DUDKA: IRQ benson frame=%u\n", du_frames);
+        (void) eraise(1u << 17);        /* event 18 (1-based) in dispak */
 }
 
 /* УВВ (033): only the device numbers used by ДУДКА/ТРУБКА/БЕНСОН are
@@ -1963,6 +2095,11 @@ e50(void)
                 txt.p_b = 0;
                 niti_frame(txt, 64);
         } return E_SUCCESS;
+        case 01213:     /* B1 test hook: ФИЗОБМ with KUS bit 27 (е27гп).
+                         * Not a real ДИСПАК extracode; the guest calls пв
+                         * ФИЗОБМ as a subroutine, invisible to the emulator. */
+                dudka_frame_xfer();
+                return E_SUCCESS;
         case 01212:     /* discard print stream */
                 return E_SUCCESS;
         case 07700:     /* set alarm */
