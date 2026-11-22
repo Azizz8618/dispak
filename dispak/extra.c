@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <ctype.h>
 #include "defs.h"
 #include "disk.h"
@@ -34,6 +35,102 @@ dd_debug (void)
     if (v < 0)
         v = getenv ("BESM6_DD_DEBUG") != NULL;
     return v;
+}
+
+/*
+ * Functional NITI emulation layer (NITI-EMULATION-PLAN.md, stage B2).
+ *
+ * ЭК 1210/1216/1217 select the NITI plotter scheme: in the real OS ТРУБКА
+ * loads the ДУДКА driver through gпнити.  The frame that ДУДКА would pass
+ * to ФИЗОБМ with KUS bit 27 (е27гп) is captured through the E50 01211
+ * writer below.  Registers, buffers and interrupts are not emulated: this
+ * is the functional data path only, so the plot.dat format stays identical.
+ */
+static int      niti_active;            /* a NITI scheme has been selected  */
+static unsigned niti_scheme;            /* last selected subfunction        */
+static unsigned niti_schemes;           /* number of scheme selections      */
+static unsigned niti_frames;            /* number of captured frames        */
+static unsigned niti_words;             /* number of captured words         */
+
+static int
+niti_debug(void)
+{
+        static int v = -1;
+        if (v < 0)
+                v = getenv("BESM6_NITI_DEBUG") != NULL;
+        return v;
+}
+
+static void
+niti_report(void)
+{
+        fprintf(stderr,
+                "NITI: summary schemes=%u frames=%u words=%u active=%d scheme=%04o\n",
+                niti_schemes, niti_frames, niti_words, niti_active, niti_scheme);
+}
+
+static void
+niti_report_register(void)
+{
+        static int registered;
+        if (!registered) {
+                atexit(niti_report);
+                registered = 1;
+        }
+}
+
+uint64_t getword(ptr *bp);      /* defined below, used by niti_plot_write */
+
+/* Write one plotter frame: octal 6-bit groups, eight numbers per line.
+ * Shared by the legacy E50 01211 handler and the NITI frame hook so that
+ * both produce the byte-for-byte identical plot.dat format. */
+static void
+niti_plot_write(ptr txt, int nwords)
+{
+        static FILE *plot;
+        int i;
+
+        if (plot == NULL) {
+                plot = fopen("plot.dat", "w");
+                if (!plot) {
+                        perror("Cannot open plot.dat\n");
+                        exit(1);
+                }
+        }
+        for (i = 0; i < nwords; ++i) {
+                unsigned long long v = getword(&txt);
+                int j;
+                for (j = 7; j >= 0; --j)
+                        fprintf(plot, "%02o ", (unsigned)((v >> (j * 6)) & 077));
+                fputc('\n', plot);
+        }
+        fflush(plot);
+}
+
+/* ЭК 1210/1216/1217: select the NITI scheme. */
+static void
+niti_select(unsigned code)
+{
+        niti_report_register();
+        niti_active = 1;
+        niti_scheme = code;
+        ++niti_schemes;
+        fprintf(stderr, "NITI: scheme %04o selected\n", code);
+}
+
+/* Capture one 64-word frame from the NITI / E50 01211 data path.
+ * A full B1 emulation would call this from the ФИЗОБМ KUS-bit-27 path;
+ * for B2 the existing E50 01211 handler is the frame source. */
+static void
+niti_frame(ptr txt, int nwords)
+{
+        niti_report_register();
+        ++niti_frames;
+        niti_words += nwords;
+        niti_plot_write(txt, nwords);
+        if (niti_debug())
+                fprintf(stderr, "NITI: frame %u captured (%d words)\n",
+                        niti_frames, nwords);
 }
 
 #define IS_DIGIT(c)     (c >= '0' && c <= '9')
@@ -1697,30 +1794,17 @@ e50(void)
         }        return E_SUCCESS;
         case 01207:
                 return E_SUCCESS;
+        case 01210:     /* NITI: select plotter scheme (ДУДКА via ТРУБКА) */
+        case 01216:     /* NITI: ГП НИТИ, вариант К-71 */
+        case 01217:     /* NITI: ГП НИТИ, вариант К-71 */
+                niti_select(reg[016]);
+                return E_SUCCESS;
         case 01211:     /* plotter output (64 words starting from the address on acc) */
-               if (reg[3] == 071717) {
-                static FILE * plot = NULL;
-                int i;
+               if (reg[3] == 071717 || niti_active) {
                 ptr txt;
                 txt.p_w = ADDR(acc.r);
                 txt.p_b = 0;
-                if (plot == NULL) {
-                        plot = fopen("plot.dat", "w");
-                        if (!plot) {
-                                perror("Cannot open plot.dat\n");
-                                exit(1);
-                        }
-                }
-                for (i = 0; i < 64; ++i) {
-                        unsigned long long v = getword(&txt);
-                        int j;
-                        for (j = 7; j >= 0; --j) {
-                                int val = (v >> (j*6)) & 077;
-                                fprintf(plot, "%02o ", val);
-                        }
-                        fputc('\n', plot);
-                }
-                fflush(plot);
+                niti_frame(txt, 64);
         } return E_SUCCESS;
         case 01212:     /* discard print stream */
                 return E_SUCCESS;
