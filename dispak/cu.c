@@ -232,6 +232,7 @@ dbg:
             static int montrace = 0, monseen = 0;
             int dbg = dd_debug ();
             static int core_on_pc = -1, core_done = 0, core_skip = 0;
+            static int kcount_pc = -1;      /* EXECUTE-реарм [0417] (v13) */
             /* Шаг 2б (ГЛИССАДА): окно MTR настраивается через
              * BESM6_MTR_LO/BESM6_MTR_HI (восьмеричные) и длина через
              * BESM6_MTR_N (десятичная); по умолчанию 10260-12500,
@@ -250,8 +251,10 @@ dbg:
             if (core_on_pc < 0) {
                 const char *c = getenv ("BESM6_CORE_ON_PC");
                 const char *cs = getenv ("BESM6_CORE_SKIP");
+                const char *kp = getenv ("BESM6_KCOUNT_ON_PC");
                 core_on_pc = c ? (int) strtol (c, NULL, 8) : 0;
                 core_skip = cs ? atoi (cs) : 0;
+                kcount_pc = kp ? (int) strtol (kp, NULL, 8) : 0;
             }
             if (abpc >= mtr_lo && abpc <= mtr_hi) {
                 /* BESM6_MTR_SKIP: пропустить первые K срабатываний окна
@@ -271,6 +274,31 @@ dbg:
                         abpc, abright ? 'R' : 'L', reg[016],
                         uicore[abpc][0].i_opcode, uicore[abpc][0].i_addr,
                         uicore[abpc][1].i_opcode, uicore[abpc][1].i_addr);
+            /* ГЛИССАДА 14.11-26 (восстановление v13, ETAP1 18.21(в)):
+             * реарм EXECUTE-патча [0417] := 0o414 при входе форматного
+             * конвейера (BESM6_KCOUNT_ON_PC=pc, восьм.) - ротация МОНЫ
+             * затирает [0417] после первого redirect'а. */
+            if (kcount_pc > 0 && abpc == kcount_pc) {
+                extern void glis1r_ntv_v19_patch (int);
+                static const char *v19_sw = 0;
+                static int kcnt_seen = 0;
+                if (! v19_sw)
+                    v19_sw = getenv ("BESM6_NTV_V19");
+                core [0417].w_b [4] = 0;
+                core [0417].w_b [5] = 0414 & 0xFF;
+                /* v19 (п.18.26/18.27): подмена буфера 76000 k12-конвертом
+                 * при входе форматного конвейера МОНА-80 - МОНА-МОNREAD*
+                 * (12240-12254) затирает тела RLE-развёрткой листа ПОСЛЕ
+                 * arming; включается BESM6_NTV_V19=1 (изоляция 18.27:
+                 * кандидат на убийство LUN 32) */
+                if (v19_sw && *v19_sw == '1')
+                    glis1r_ntv_v19_patch (abpc);
+                if (! kcnt_seen) {
+                    kcnt_seen = 1;
+                    fprintf (stderr, "EXECUTE [0417] := 00414 at pc %05o "
+                             "(each entry)\n", abpc);
+                }
+            }
             if (dbg && ui.i_opcode == 050)   /* Э50 */
                 fprintf(stderr, "E50at %05o%c type=%05o acc=%08o%08o\n",
                         abpc, abright ? 'R' : 'L', ui.i_addr,
@@ -351,7 +379,9 @@ dbg:
                         addr, ui.i_reg, mv);
                 /* Шаг 4в (ГЛИССАДА): печать всех М-регистров для реверса */
                 fprintf(stderr, " M:");
-                for (int rr = 1; rr <= 14; ++rr)
+                for (int rr = 1; rr <= 16; ++rr)    /* v21 (п.18.24): +
+                 * И15/И16 (reg[15]/reg[16]) - адреса МОНА-80-конвейера
+                 * данных (xta 52(11)/utm 77766(15)) не видны при <=14 */
                     fprintf(stderr, " %02o=%05o", rr, reg[rr] & 077777);
                 fprintf(stderr, " R16=%05o R17=%05o\n",
                         reg[016] & 077777, reg[017] & 077777);

@@ -2143,6 +2143,331 @@ put_check_words(ushort u, ushort zone, ushort addr, int copy2_req) {
         STORE(t, 017);  /* checksum */
 }
 
+/* А2 14.11-26 (восстановление v13-v15, ETAP1 18.20(б)/18.21(б)/18.22,
+ * утрачено при откате репо 14.11-26-3): NATIVE-путь ЛУН45 (GLIS1R):
+ * k12-конверт строится ИЗ КОЛОДЫ (карты после *execute, раскладка
+ * mk_seed_k12: границы 0o12+0o32k, маркеры [11201]/[11200], тело
+ * карты = 13 слов (12 ISO-72 + EOR), филлер СИДА) и пишется на
+ * BESM6_NTV_TRACT (умолч. 06); УИК-проверка (М16=75504, УИР 45/0)
+ * подменяется на конверт-тракт (v7); [0600] := 0o76012; пустой лист
+ * на ЛУН46-тракт. Родная зона 20/04 (дек RLE) НЕ трогается. */
+static uchar    ntv_kbuf [6144];    /* конверт: 1024 слова x 6 байт (BE) */
+static uchar    ntv_kcv [1024];
+static uchar    ntv_tbuf [6144];    /* пустой лист ЛУН46 */
+static uchar    ntv_tcv [1024];
+static int      nat_enabled = -1;   /* BESM6_LUN45_NATIVE */
+static int      ntv_tract = -1;     /* BESM6_NTV_TRACT: тракт конверта */
+static int      nat_armed = 0;      /* УИК-arming прошёл (v17) */
+static int      ntv_drum = -1;      /* барабан конверта (= LUN45_DRUM) */
+
+/* v19 (п.18.26): глобальная копия конверта для подмены буфера 76000
+ * при входе форматного конвейера МОНА-80 (kcount_pc = 01004). МОНА-
+ * МОNREAD* (12240-12254, г1r-watch31) затирает тела буфера RLE-
+ * развёрткой МОНА-80-листа ПОСЛЕ arming; границы (0o6000 на 0o12+
+ * 0o32k) МОNREAD* восстанавливает сам (И4=0o130). Подмена тел при
+ * входе на 01004 (перед исполнением команды) возвращает конверт-
+ * тела для walker'а МОНА-80-I/O. Вызывается из cu.c kcount-блока. */
+uchar           glis1r_ntv_kbuf_glob [6144];
+int             glis1r_ntv_kbuf_ready = 0;
+
+void
+glis1r_ntv_v19_patch (int abpc)
+{
+    static int v19_seen = 0;
+    int k4, b4;
+    if (! glis1r_ntv_kbuf_ready)
+        return;
+    for (k4 = 0; k4 < 1024; ++k4)
+        for (b4 = 0; b4 < 6; ++b4)
+            core [076000 + k4].w_b [b4] =
+                glis1r_ntv_kbuf_glob [k4 * 6 + b4];
+    if (! v19_seen) {
+        v19_seen = 1;
+        fprintf (stderr, "NTV v19: k12-конверт -> буфер 76000 при "
+                 "входе %05o (после МОNREAD*-развёртки)\n", abpc);
+    }
+}
+static int      ntv_tract0 = -1;    /* родная raw-зона (= LUN45_TRACT) */
+
+static void
+ntv_pw (uchar *b, uint64_t v)
+{
+    int i;
+    for (i = 5; i >= 0; --i) {
+        b [i] = (uchar) (v & 0xFF);
+        v >>= 8;
+    }
+}
+
+static uchar
+ntv_iso (uchar c)
+{
+    if (c >= 'a' && c <= 'z')
+        c -= 32;
+    switch (c) {                    /* МОНА-ISO спец-символы (mk_drum_seed) */
+    case '!': return 041;
+    case '"': return 042;
+    case '#': return 023;
+    case '$': return 044;
+    case '%': return 045;
+    case '&': return 046;
+    case '\'': return 047;
+    case '(': return 050;
+    case ')': return 051;
+    case '*': return 052;
+    case '+': return 053;
+    case ',': return 054;
+    case '-': return 055;
+    case '.': return 056;
+    case '/': return 057;
+    case ':': return 072;
+    case ';': return 073;
+    case '<': return 074;
+    case '=': return 075;
+    case '>': return 076;
+    case '?': return 077;
+    case '@': return 060;
+    }
+    return c;                       /* буквы/цифры/пробел = ASCII */
+}
+
+/* карта -> 13 слов: 12 слов ISO-72 (8 бит/символ, big-endian) +
+ * слово EOR 0o1002004010020012 (эталон [М1+211], Шаг 6) */
+static int
+ntv_pack_iso72 (const char *text, uint64_t *out)
+{
+    uchar cs [72];
+    int i, j, n = strlen (text);
+    for (i = 0; i < 72; ++i)
+        cs [i] = (i < n) ? ntv_iso ((uchar) text [i]) : 040;
+    for (i = 0; i < 12; ++i) {
+        uint64_t v = 0;
+        for (j = 0; j < 6; ++j)
+            v = (v << 8) | cs [i * 6 + j];
+        out [i] = v;
+    }
+    out [12] = 01002004010020012ULL;    /* WORD_EOR */
+    return 13;
+}
+
+/* v13-v15-конверт из колоды: k12-раскладка (mk_seed_k12, "READ OK
+ * в TSTREAD"); header МОНЫ (аутентичный том 4023) conv=1; маркер
+ * [11201]@0o12 conv=1; записи: тело с bnd_prev+1, карта 13 слов
+ * conv=2, филлер 0o1002004010020040 conv=2 до bnd-2, маркер на
+ * границе bnd (последний = [11200]) conv=2, pos = bnd+1; после
+ * последней границы - НУЛИ (v15: СИД-стиль, без дубля mark_end);
+ * плюс пустой лист ЛУН46 ([11200]@0o12 conv=1). */
+static int
+lun45_native_view (int drum, int tract)
+{
+    static int nat_done = 0;
+    static const uint64_t HEADER [] = {
+        022015ULL,                  /* печать 0000000000022015 */
+        6ULL << 45 | 4ULL << 42,    /* 6400000000000000 */
+        6ULL << 45,                 /* 6000000000000000 */
+        5ULL << 45 | 4ULL << 42,    /* 5400000000000000 */
+        5ULL << 45,                 /* 5000000000000000 */
+        4ULL << 45 | 4ULL << 42,    /* 4400000000000000 */
+        4ULL << 45,                 /* 4000000000000000 */
+        1ULL << 45 | 4ULL << 42,    /* 1400000000000000 */
+        2ULL << 45,                 /* 2000000000000000 */
+        2ULL << 45 | 4ULL << 42,    /* 2400000000000000 */
+        3ULL << 45,                 /* 3000000000000000 */
+        3ULL << 45 | 4ULL << 42,    /* 3400000000000000 */
+        4ULL << 45,                 /* 4000000000000000 */
+        4ULL << 45 };               /* 4000000000000000 */
+    const uint64_t filler = 01002004010020040ULL;   /* филлер k8-стиль
+     * (mk_seed_k12 FILLER = 0o1002004010020040, ISO-пробелы СИДА,
+     * "READ OK в TSTREAD") */
+    const uint64_t mark_end  = 3ULL << 45;  /* [11200] 3000000000000000 */
+    const uint64_t mark_cont = 6ULL << 45;  /* [11201] 6000000000000000 */
+    const char *deckpath = getenv ("BESM6_DECK");
+    FILE *fp;
+    char line [256];
+    int ncards = 0, i, j, pos, bnd, in_data = 0;
+    char **cards;
+
+    memset (ntv_kbuf, 0, sizeof ntv_kbuf);
+    memset (ntv_kcv, 0, sizeof ntv_kcv);
+    if (! deckpath || ! (fp = fopen (deckpath, "r"))) {
+        fprintf (stderr, "NTV: cannot read deck %s\n",
+                 deckpath ? deckpath : "(no BESM6_DECK)");
+        return 0;
+    }
+    cards = (char **) malloc (sizeof (char *) * 128);
+    while (fgets (line, sizeof line, fp)) {
+        size_t n = strlen (line);
+        char *p = line;
+        while (n > 0 && (line [n-1] == '\n' || line [n-1] == '\r' ||
+                         line [n-1] == 0))
+            line [--n] = 0;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (! in_data) {
+            if (strncasecmp (p, "*execute", 8) == 0)
+                in_data = 1;
+            continue;                       /* до *execute пропускаем */
+        }
+        {   char *e = line + n;
+            while (e > line && e [-1] == ' ') --e;
+            *e = 0;
+            cards [ncards++] = strdup (line);
+            if (ncards >= 126)
+                break;
+        }
+        if (strncasecmp (p, "*end file", 9) == 0)
+            break;
+    }
+    fclose (fp);
+    /* *end file остаётся последней картой (mk_seed_k12: карты после
+     * *execute ВКЛЮЧАЯ *end file - конверт v15 имел 3 записи с
+     * [11200]@0o130 за *end file) */
+    fprintf (stderr, "NTV: deck %s -> %d data cards\n", deckpath, ncards);
+
+    for (i = 0; i < (int)(sizeof HEADER / sizeof HEADER [0]); ++i) {
+        ntv_pw (ntv_kbuf + i * 6, HEADER [i]);
+        ntv_kcv [i] = 1;                        /* CONV_CMD */
+    }
+    ntv_pw (ntv_kbuf + 012 * 6, mark_cont);
+    ntv_kcv [012] = 1;                          /* CONV_CMD */
+
+    pos = 014;                                  /* тело с 0o14 */
+    for (i = 0; i < ncards; ++i) {
+        uint64_t ws [13];
+        bnd = 012 + 032 * (i + 1);              /* граница записи (dec!) */
+        if (pos + 13 > bnd - 1) {
+            fprintf (stderr, "NTV: card %d too long\n", i + 1);
+            return 0;
+        }
+        ntv_pack_iso72 (cards [i], ws);
+        for (j = 0; j < 13; ++j, ++pos) {
+            ntv_pw (ntv_kbuf + pos * 6, ws [j]);
+            ntv_kcv [pos] = 2;                  /* CONV_DATA */
+        }
+        for (; pos < bnd - 1; ++pos) {          /* филлер до границы */
+            ntv_pw (ntv_kbuf + pos * 6, filler);
+            ntv_kcv [pos] = 2;
+        }
+        /* v19b (п.18.31): лист-формат - счётчик слов тела на
+         * предграничной позиции (bnd-1 = марка+0o31; native53-буфер:
+         * счётчик [76043] = 0o0004 при 4 значимых словах тела записи
+         * "0TIP SAMOLETA: MIG-15"). Карта = 13 значимых слов
+         * (12 x ISO-72 + EOR) -> счётчик 0o0015. МОНА-80-I/O ЭКСТ
+         * проверяет ИНФ.СЛ записи: raw-конверт без счётчиков давал
+         * 201 x6 и пр.34 "ОШ.В ИНФ.СЛ.ЭКСТ" (СБРОС). */
+        ntv_pw (ntv_kbuf + (bnd - 1) * 6, (uint64_t) 015);
+        ntv_kcv [bnd - 1] = 2;
+        ntv_pw (ntv_kbuf + bnd * 6,
+                (i == ncards - 1) ? mark_end : mark_cont);
+        ntv_kcv [bnd] = 2;
+        pos = bnd + 1;                          /* следующая ЗА маркером */
+    }
+    /* v15: СИД-стиль - после последней границы [11200] на границе,
+     * ЗА ней НУЛИ (буфер обнулён); без дубля mark_end. */
+    if (ntv_tract < 0) {
+        const char *nt = getenv ("BESM6_NTV_TRACT");
+        ntv_tract = nt ? (int) strtol (nt, NULL, 8) : 06;
+    }
+    disk_writei (drumh, disks [drum].offset + ntv_tract,
+                 (char *) ntv_kbuf, (char *) ntv_kcv,
+                 NULL, DISK_MODE_QUIET);
+    fprintf (stderr, "NTV: k12-конверт %d карт -> u=%02o z=%04o, "
+             "[0600] := 076012\n", ncards, drum, ntv_tract);
+
+    /* v13-3а: word-pointer на начало конверта в буфере 76000.
+     * v16 (п.18.23): BESM6_NTV_KCOUNT=0 ОТКЛЮЧАЕТ реарм - МОНА-
+     * конвейер данных идёт по ШТАТНОЙ raw-позиции ([0600]=0o77146,
+     * позиция карт в raw-раскладке), т.к. data-чтения ЛУН45 берут
+     * родную зону 20/04 (redirect только УИК) и перекачка raw
+     * (Э70 53) кладёт raw-слова в буфер 76000 - walker по конверт-
+     * раскладке на raw-данных давал СМЕСЬ и 201-петлю x6. */
+    {
+        const char *nk = getenv ("BESM6_NTV_KCOUNT");
+        if (! (nk && *nk == '0')) {
+            core [0600].w_b [4] = 076;
+            core [0600].w_b [5] = 012;
+        } else
+            fprintf (stderr, "NTV v16: [0600] реарм ОТКЛЮЧЁН - "
+                     "штатный raw-путь\n");
+    }
+
+    /* v18 (п.18.24): k12-конверт В МОНА-ВХОДНОЙ ПОТОК [100256+k] -
+     * источник перекачки МОНА-конвейера данных (64277L xta 365(2),
+     * И2=77671+k -> addr = 0o77671+0o365 = 0o100256, МОНА-область;
+     * g1r-core619: [100256+] = живые МОНА-ISO-слова raw-дека).
+     * Трансляция уже прошла (arming = после неё), поток дальше ест
+     * только data-стадия: МОНА-конвейер прочтёт КОНВЕРТ-карты
+     * (маркеры на 100256+0o12+0o32k). BESM6_NTV_STREAM=1 включает. */
+    {
+        const char *ns = getenv ("BESM6_NTV_STREAM");
+        if (ns && *ns == '1') {
+            int k2, b3;
+            for (k2 = 0; k2 < 1024; ++k2)
+                for (b3 = 0; b3 < 6; ++b3)
+                    core [0100256 + k2].w_b [b3] =
+                        ntv_kbuf [k2 * 6 + b3];
+            fprintf (stderr, "NTV v18: k12-конверт -> МОНА-поток "
+                     "[100256..101277]\n");
+        }
+    }
+
+    /* v19 (п.18.26): глобальная копия конверта для cu.c kcount-блока
+     * (подмена буфера 76000 при входе 01004 - после МОNREAD*-развёртки
+     * МОНА-80-листа). Управляется тем же BESM6_NTV_STREAM=1. */
+    {
+        const char *ns2 = getenv ("BESM6_NTV_STREAM");
+        if (ns2 && *ns2 == '1') {
+            memcpy (glis1r_ntv_kbuf_glob, ntv_kbuf, 6144);
+            glis1r_ntv_kbuf_ready = 1;
+            fprintf (stderr, "NTV v19: глобальная копия конверта готова "
+                     "(подмена буфера при входе форматного конвейера)\n");
+        }
+    }
+
+    /* v20 (п.18.26/18.27): k12-конверт В МОНА-RLE-СПУЛ [2767+].
+     * ВНИМАНИЕ (18.27): ВРЕДНО - ломает каналы МОНА-80-I/O! МОНА-RLE-
+     * спул = RLE-сжатый МОНА-лист (развёртка МОNREAD* даёт заголовок
+     * "BESM-6, FORTRAN IPM" с канал-описаниями); конверт (не-RLE) ->
+     * развёртка = нули/филлер -> каналы не строятся -> "НЕТ КАНАЛА
+     * LUN 32", задача умирает на 1-м ФОРТРАН-READ. НЕ ВКЛЮЧАТЬ.
+     * Осталось для 18.28-археологии (BESM6_NTV_SPOOL=1). */
+    {
+        const char *sp = getenv ("BESM6_NTV_SPOOL");
+        if (sp && *sp == '1') {
+            int k5, b5;
+            for (k5 = 0; k5 < 1024; ++k5)
+                for (b5 = 0; b5 < 6; ++b5)
+                    core [02767 + k5].w_b [b5] =
+                        ntv_kbuf [k5 * 6 + b5];
+            fprintf (stderr, "NTV v20: k12-конверт -> МОНА-RLE-спул "
+                     "[2767..7766]\n");
+        }
+    }
+
+    /* v13-4: пустой лист на ЛУН46 - конец очереди для GIVELEXX
+     * (BESM6_LUN46_DRUM/BESM6_LUN46_TRACT, как в redirect-блоке) */
+    {
+        const char *d6 = getenv ("BESM6_LUN46_DRUM");
+        const char *t6 = getenv ("BESM6_LUN46_TRACT");
+        int drum46 = d6 ? (int) strtol (d6, NULL, 8) : -1;
+        int tract46 = t6 ? (int) strtol (t6, NULL, 8) : 0;
+        if (drum46 >= 0) {
+            memset (ntv_tbuf, 0, sizeof ntv_tbuf);
+            memset (ntv_tcv, 0, sizeof ntv_tcv);
+            ntv_pw (ntv_tbuf + 012 * 6, mark_end);
+            ntv_tcv [012] = 1;                      /* CONV_CMD */
+            disk_writei (drumh, disks [drum46].offset + tract46,
+                         (char *) ntv_tbuf, (char *) ntv_tcv,
+                         NULL, DISK_MODE_QUIET);
+            fprintf (stderr, "NTV: пустой лист -> ЛУН46 u=%02o z=%04o\n",
+                     drum46, tract46);
+        }
+    }
+    for (i = 0; i < ncards; ++i)
+        free (cards [i]);
+    free (cards);
+    return 1;
+}
+
 int
 ddio(void)
 {
@@ -2242,6 +2567,27 @@ ddio(void)
                         core [0600].w_b [5] = kv & 0xFF;
                         fprintf (stderr, "KCOUNT [0600] := %05o\n", kv);
                     }
+                    /* А2 14.8-3 (ГЛИССАДА): эмуляция штатной установки
+                     * [0417] - 4-го слова характеристики строки MONCARD
+                     * (SIMFAIL* paramt%: A, K, сдвиг, A+L - конец строки+1;
+                     * буфер 0414-0417, ETAP1 п.14.8-1). РЛС-ротация пишет
+                     * веса в 0414/0415/0416 ([0415]:=0o64, [0416]:=0o20),
+                     * но стадию для 0417 в данной конфигурации не выполняет,
+                     * и контроль IOCONT* 01523-01526 упирается в
+                     * ((W & 0o40000) | [0417]) != 0 при [0417]=0.
+                     * BESM6_LUN45_EXECUTE=значение (восьм., пишется в
+                     * младшие разряды [0417] при ПЕРВОМ redirect u=45;
+                     * правдоподобное штатное значение 0o414 = A+L для
+                     * MK@0o400, L=12 слов). */
+                    {
+                        const char *ex = getenv ("BESM6_LUN45_EXECUTE");
+                        if (ex) {
+                            ushort ev = (ushort) strtol (ex, NULL, 8);
+                            core [0417].w_b [4] = 0;
+                            core [0417].w_b [5] = ev & 0xFF;
+                            fprintf (stderr, "EXECUTE [0417] := %05o\n", ev);
+                        }
+                    }
                     const char *sf = getenv ("BESM6_DRUM_SEED");
                     seeded = 1;
                     if (sf) {
@@ -2269,12 +2615,96 @@ ddio(void)
                         }
                     }
                 }
+            /* А2 14.11-26 (v13-v15, восстановление): NATIVE-путь -
+             * k12-конверт из колоды на BESM6_NTV_TRACT при первом
+             * redirect; УИК-проверка (М16=75504) на конверт-тракт
+             * (v7, ETAP1 18.20(б)); остальные чтения u=45 - родная
+             * зона l45_tract (дек RLE, данные МОНА берёт 1:1). */
+            if (nat_enabled < 0) {
+                const char *ne = getenv ("BESM6_LUN45_NATIVE");
+                nat_enabled = (ne && *ne && *ne != '0') ? 1 : 0;
+            }
+            if (nat_enabled && reg [016] == 075504) {
+                static int nat_done = 0;
+                if (! nat_done) {
+                    nat_done = 1;
+                    ntv_drum = l45_drum;        /* v17: запомнить
+                     * родную raw-зону для подмены data-чтений */
+                    ntv_tract0 = l45_tract;
+                    lun45_native_view (l45_drum, l45_tract);
+                }
+                nat_armed = 1;                  /* v17: arming прошёл */
+                if (ntv_tract < 0)
+                    ntv_tract = 06;
+                u = l45_drum;
+                zone = ntv_tract;       /* УИК-проверка -> конверт */
+                dd = disks + u;
+                fprintf (stderr, "NTV v7: УИК-проверка -> u=%02o "
+                         "z=%04o (конверт в буфер 76000)\n", u, zone);
+            } else {
                 u = l45_drum;
                 zone = l45_tract;
                 dd = disks + u;     /* dd уже назначен по старому u */
                 if (dd_debug ())
                     fprintf (stderr, "LUN45 redirect -> u=%02o z=%04o\n",
                              u, zone);
+            }
+        }
+        }
+        /* А2 13.11-10 (ГЛИССАДА, п.18.11(3)): ЛУН46 = следующий лист
+         * очереди спула. После исчерпания листа ЛУН45 GIVELEXX (05355)
+         * читает Э70 с юнитом 46 (УС 0o0010370000460000, зона 0 ->
+         * лист 37000); на реальной системе следующий лист существует
+         * (следующее задание очереди), в прогоне k12 юнит 46 не
+         * подключён (disks[46].diskno=0) -> E_CWERR "ОШ.В ИНФ.СЛ.ЭКСТ".
+         * Подсадка: запись 1 сида k12 уже лежит на тракте
+         * BESM6_LUN46_TRACT барабана BESM6_LUN46_DRUM (подсажена
+         * DRUM_SEED вместе с конвертом); это пустой лист с маркером
+         * конца [11200]@0o12 -> штатный "конец очереди".
+         * Side-effects (KCOUNT/EXECUTE/DRUM_SEED) остаются при первом
+         * redirect u=45 - здесь только переадресация обмена. */
+        {
+            static int l46_drum = -1, l46_tract = -1;
+            if (l46_drum < 0) {
+                const char *d = getenv ("BESM6_LUN46_DRUM");
+                const char *t = getenv ("BESM6_LUN46_TRACT");
+                l46_drum  = d ? (int) strtol (d, NULL, 8) : -1;
+                l46_tract = t ? (int) strtol (t, NULL, 8) : 0;
+            }
+            if (l46_drum >= 0 && u == 046) {
+                u = l46_drum;
+                zone = l46_tract;
+                dd = disks + u;     /* dd уже назначен по старому u */
+                if (dd_debug ())
+                    fprintf (stderr, "LUN46 redirect -> u=%02o z=%04o\n",
+                             u, zone);
+            }
+        }
+        /* А2 13.11-17 (ГЛИССАДА, п.А3): ЛУНы 0o47-0o57 = следующие
+         * листы очереди после 46. Обход GIVELEXX многолистового
+         * задания (GLIS1R, 6 модулей) доходит до них и умирает
+         * E_CWERR (СТП 00020). BESM6_LUN_TAIL=тракт пустого листа
+         * ([11200]@0o12, "конец очереди") на барабане
+         * BESM6_LUN46_DRUM: все ЛУНы 0o47-0o57 redirected туда. */
+        {
+            static int ltail_tract = -2;
+            if (ltail_tract == -2) {
+                const char *t = getenv ("BESM6_LUN_TAIL");
+                ltail_tract = t ? (int) strtol (t, NULL, 8) : -1;
+            }
+            if (ltail_tract >= 0 && u >= 047 && u <= 057) {
+                static int l46d2 = -1;
+                int oldu = u;
+                if (l46d2 < 0) {
+                    const char *d = getenv ("BESM6_LUN46_DRUM");
+                    l46d2 = d ? (int) strtol (d, NULL, 8) : 020;
+                }
+                u = l46d2;
+                zone = ltail_tract;
+                dd = disks + u;
+                if (dd_debug ())
+                    fprintf (stderr, "LUN%02o tail redirect -> u=%02o z=%04o\n",
+                             oldu, u, zone);
             }
         }
         if (uil.i_opcode & 4) {         /* физобмен */
@@ -2333,6 +2763,31 @@ ddio(void)
             }
         }
 
+        /* v17 (п.18.23, ETAP1 18.22(л)): МОНА-конвейер данных читает
+         * raw-зону ПРЯМО (u=барабан 20, z=04, DD pc=00052L r016=00045
+         * - минуя ЛУН45-канал и УИК-redirect); после УИК-arming все
+         * (ntv_drum, ntv_tract0)-чтения -> конверт-тракт, иначе
+         * перекачка raw (Э70 53) кладёт дек-слова поверх конверта в
+         * буфере 76000 (двойной источник -> 201-петля x6). Трансляция
+         * (до УИК) не затрагивается. BESM6_NTV_ALL=1 включает. */
+        if (nat_armed && ntv_drum >= 0 && u == ntv_drum &&
+            zone == ntv_tract0) {
+            const char *na = getenv ("BESM6_NTV_ALL");
+            if (na && *na == '1') {
+                zone = ntv_tract;
+                fprintf (stderr, "NTV v17: data-чтение (20,%04o) -> "
+                         "конверт z=%04o\n", ntv_tract0, ntv_tract);
+            }
+        }
+        {   /* v17-диагностика: первые 200 (u, zone) после arming */
+            static int nat_diag = 0;
+            if (nat_armed && nat_diag < 200) {
+                ++nat_diag;
+                fprintf (stderr, "NTV17x: u=%02o z=%04o armed=%d "
+                         "drum=%02o t0=%04o\n", u, zone, nat_armed,
+                         ntv_drum, ntv_tract0);
+            }
+        }
         if (uil.i_reg & 8) {                // секторный обмен
                /* согласно ВЗУ и ХЛАМу, 36-й разряд означает, что номер "зоны"
                 * есть не номер тракта, а номер сектора (обмен по КУС).
