@@ -30,6 +30,8 @@
 #define SMALL_DISKS()   (getenv("BESM6_SMALL_DISKS") || disk_emulate_725)
 
 static int du_plot_keep(void);  /* used by the atexit report below */
+static int du_benson_mode(void); /* [аналог NASA, БЕНСОН-501] */
+static void du_benson_close(void);
 
 /* Отладочная трасса этапа 1 проекта ГЛИССАДА-6: дампы Э70/дд_обмена
  * в stderr.  Включается переменной окружения BESM6_DD_DEBUG. */
@@ -218,10 +220,20 @@ niti_report(void)
                 du_irq_raised, du_irq_taken, du_irq_proxy);
         fprintf(stderr, "DUDKA: WAKETASK E37 SHG=%u "
                 "(task wakeup NOT modeled: guest пб БПУ)\n", du_waketasks);
-        fprintf(stderr, "DUDKA: BENCH X=%d Y=%d pen=%s steps=%d [аналог NASA]\n",
+        fprintf(stderr, "DUDKA: BENCH X=%d Y=%d pen=%s steps=%d "
+                "[аналог NASA, БЕНСОН-501]\n",
                 ben.x, ben.y, ben.pen_down ? "DOWN" : "UP", ben.steps);
-        /* Dubna writes calcomp.svg (and calcomp.out only with keep). */
-        dubna_plot_finish(du_plot_keep());
+        du_benson_close();
+        /* The proven renderer always writes calcomp.svg; in BENSON mode the
+         * user-visible stream is БЕНСОН-501 codes, so rename that SVG and keep
+         * the raw Calcomp file off disk.  [аналог NASA, БЕНСОН-501] */
+        dubna_plot_finish(du_benson_mode() ? 0 : du_plot_keep());
+        if (du_benson_mode()) {
+                if (rename("calcomp.svg", "benson.svg") != 0 && errno != ENOENT)
+                        fprintf(stderr, "DUDKA: cannot rename SVG "
+                                "[аналог NASA, БЕНСОН-501]\n");
+                remove("calcomp.out");
+        }
         if (plotlog) {
                 fclose(plotlog);
                 plotlog = NULL;
@@ -384,6 +396,23 @@ du_plot_keep(void)
         return v;
 }
 
+/* Select the user-visible plotter command stream.  Calcomp stays the default
+ * so the existing decoder tests are unchanged.  [аналог NASA, БЕНСОН-501] */
+static int
+du_benson_mode(void)
+{
+        static int v = -1;
+        const char *env;
+
+        if (v < 0) {
+                v = 0;
+                env = getenv("BESM6_DUDKA_PLOT");
+                if (env && !strcmp(env, "benson"))
+                        v = 1;
+        }
+        return v;
+}
+
 static const char *const du_action_name[] = {
         "NOP", "+X", "-X", "+Y", "-Y", "UP", "DOWN"
 };
@@ -473,6 +502,120 @@ du_decode_calcomp_byte(unsigned char byte)
         bench_move(dir, dx, dy, "[аналог CalComp]");
 }
 
+/* Command codes of the БЕНСОН-501 interface to Электроника-1001, table 2
+ * (p.7) of NASA TM-76182.  These are external-device command codes, never an
+ * НИТИ/БЭСМ-6 wire protocol.  [аналог NASA, БЕНСОН-501] */
+#define BENSON_X_PLUS   06502
+#define BENSON_X_MINUS  06514
+#define BENSON_Y_PLUS   06501
+#define BENSON_Y_MINUS  06504
+#define BENSON_PEN_UP   06511
+#define BENSON_PEN_DOWN 06512
+
+static FILE *benson_out;
+
+/* Internal bridge only: turn one БЕНСОН-501 command into the equivalent byte
+ * of the already-proven plotter.cpp renderer.  A second SVG renderer would
+ * duplicate tested code, so the user stream stays БЕНСОН codes while this
+ * private conversion feeds the Calcomp parser through dubna_plot_put(0, .).
+ * [аналог NASA, БЕНСОН-501] */
+static unsigned char
+benson_to_renderer_byte(unsigned code)
+{
+        switch (code) {
+        case BENSON_X_PLUS:   return 02;
+        case BENSON_X_MINUS:  return 01;
+        case BENSON_Y_PLUS:   return 020;
+        case BENSON_Y_MINUS:  return 040;
+        case BENSON_PEN_UP:   return 04;
+        case BENSON_PEN_DOWN: return 010;
+        default:              return 0;
+        }
+}
+
+/* Emit exactly one command: human-readable log, optional benson.out line and
+ * the internal bridge to the renderer.  [аналог NASA, БЕНСОН-501] */
+static void
+du_benson_emit(unsigned code, const char *name, int dx, int dy, int pen_event)
+{
+        if (pen_event) {
+                ben.pen_down = pen_event > 0;
+        } else {
+                bench_move(name, dx, dy, "[аналог NASA, БЕНСОН-501]");
+        }
+        du_log("DUDKA: BENSON command %03o (%s) X=%05d Y=%05d "
+               "[аналог NASA, БЕНСОН-501]\n", code, name, ben.x, ben.y);
+        if (du_plot_keep()) {
+                if (!benson_out)
+                        benson_out = fopen("benson.out", "w");
+                if (benson_out) {
+                        fprintf(benson_out, "%03o %s X=%05d Y=%05d "
+                                "[аналог NASA, БЕНСОН-501]\n",
+                                code, name, ben.x, ben.y);
+                        fflush(benson_out);
+                }
+        }
+        if (du_plot_device() >= 0)
+                dubna_plot_put(0, benson_to_renderer_byte(code));
+        ++du_plot_bytes;
+}
+
+/* One step of the БЕНСОН-501 command set.  The pen command comes first, then
+ * X, then Y; a diagonal step becomes two commands.  [аналог NASA, БЕНСОН-501] */
+static void
+du_decode_benson_step(int dx, int dy, int pen_event)
+{
+        if (pen_event < 0)
+                du_benson_emit(BENSON_PEN_UP, "UP", 0, 0, -1);
+        else if (pen_event > 0)
+                du_benson_emit(BENSON_PEN_DOWN, "DOWN", 0, 0, 1);
+        if (dx > 0)
+                du_benson_emit(BENSON_X_PLUS, "+X", 1, 0, 0);
+        else if (dx < 0)
+                du_benson_emit(BENSON_X_MINUS, "-X", -1, 0, 0);
+        if (dy > 0)
+                du_benson_emit(BENSON_Y_PLUS, "+Y", 0, 1, 0);
+        else if (dy < 0)
+                du_benson_emit(BENSON_Y_MINUS, "-Y", 0, -1, 0);
+}
+
+/* Decode an extracted byte into a БЕНСОН-501 step without calling the Calcomp
+ * logger on the main path.  [аналог NASA, БЕНСОН-501] */
+static void
+du_benson_decode_byte(unsigned char byte)
+{
+        int dx = 0, dy = 0, pen[2], np = 0;
+
+        if (byte & 01)
+                dx = -1;
+        if (byte & 02)
+                dx = 1;
+        if (byte & 04)
+                pen[np++] = -1;
+        if (byte & 010)
+                pen[np++] = 1;
+        if (byte & 020)
+                dy = 1;
+        if (byte & 040)
+                dy = -1;
+        if (!dx && !dy && !np)
+                return;
+        /* A byte may carry both pen bits, as in the proven bit layout; keep
+         * both events, up first, then down with the step. */
+        if (np == 2)
+                du_decode_benson_step(0, 0, pen[0]);
+        du_decode_benson_step(dx, dy, np == 2 ? pen[1] : (np ? pen[0] : 0));
+}
+
+static void
+du_benson_close(void)
+{
+        if (benson_out) {
+                fclose(benson_out);
+                benson_out = NULL;
+        }
+}
+
 static void
 du_decode_element(unsigned w)
 {
@@ -526,8 +669,12 @@ du_decode_stream(ptr txt, int nwords)
         }
         if (!logged) {
                 logged = 1;
-                du_log("DUDKA: DECODE proven 6 bytes/word BytePointer order "
-                       "[аналог CalComp]\n");
+                if (du_benson_mode())
+                        du_log("DUDKA: BENSON codec, 6 bytes/word BytePointer "
+                               "order [аналог NASA, БЕНСОН-501]\n");
+                else
+                        du_log("DUDKA: DECODE proven 6 bytes/word BytePointer order "
+                               "[аналог CalComp]\n");
         }
         device = du_plot_device();
         for (i = 0; i < nwords; ++i) {
@@ -535,10 +682,16 @@ du_decode_stream(ptr txt, int nwords)
                 for (k = 0; k < 6; ++k) {
                         unsigned char byte =
                                 (unsigned char)((w >> (40 - 8 * k)) & 0xff);
-                        if (device >= 0)
-                                dubna_plot_put(device, byte);
-                        ++du_plot_bytes;
-                        du_decode_calcomp_byte(byte);
+                        if (du_benson_mode()) {
+                                /* Emits БЕНСОН-501 commands and feeds the
+                                 * proven renderer internally. */
+                                du_benson_decode_byte(byte);
+                        } else {
+                                if (device >= 0)
+                                        dubna_plot_put(device, byte);
+                                ++du_plot_bytes;
+                                du_decode_calcomp_byte(byte);
+                        }
                 }
         }
 }
@@ -566,10 +719,15 @@ niti_frame(ptr txt, int nwords)
         niti_plot_write(txt, nwords);
         du_log("DUDKA: FRAME %u words=%d\n", niti_frames, nwords);
         du_decode_stream(txt, nwords);  /* txt is passed by value: still at start */
-        du_log("DUDKA: DUBNA-PLOT device=%s bytes=%u page=%u %s\n",
-               du_plot_device() >= 0 ? du_plot_device_name[du_plot_device()] : "off",
-               du_plot_bytes, niti_frames,
-               du_decode_proven() ? "[аналог CalComp]" : "[hypothesis]");
+        if (du_benson_mode())
+                du_log("DUDKA: BENSON codec commands=%u page=%u "
+                       "[аналог NASA, БЕНСОН-501]\n",
+                       du_plot_bytes, niti_frames);
+        else
+                du_log("DUDKA: DUBNA-PLOT device=%s bytes=%u page=%u %s\n",
+                       du_plot_device() >= 0 ? du_plot_device_name[du_plot_device()] : "off",
+                       du_plot_bytes, niti_frames,
+                       du_decode_proven() ? "[аналог CalComp]" : "[hypothesis]");
         if (niti_debug())
                 fprintf(stderr, "NITI: frame %u captured (%d words)\n",
                         niti_frames, nwords);
