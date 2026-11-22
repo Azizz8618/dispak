@@ -413,6 +413,42 @@ du_benson_mode(void)
         return v;
 }
 
+/* Coordinate frame decoder for the FOREX -> PDEV -> ЭК 01211 path.
+ *
+ * FRAME CONTRACT (agreed with fortran/verify/PDEV.mad):
+ *   word 0 = X in steps of 0.1 mm, octal integer
+ *   word 1 = Y in steps of 0.1 mm, octal integer
+ *   word 2 = pen state (0 = up, 1 = down)
+ *   words 3..63 = 0
+ * FOREX 4.12 stores INTEGER values with a type tag in the high 24 bits
+ * (0xd00000...); the coordinate is the low 24 bits.  The tag is stripped
+ * here rather than in PDEV, which only points ЭК 01211 at the COMMON.
+ *
+ * `coords` is the default when BESM6_DUDKA_PLOT=benson.  The previous raw
+ * 6-bytes/word path stays available as BESM6_NITI_DECODE=proven (also
+ * dubna/raw), so the A/B comparison against Dubna is not broken. */
+static int
+du_decode_coords(void)
+{
+        static int v = -1;
+        const char *env;
+
+        if (v < 0) {
+                v = 0;
+                env = getenv("BESM6_NITI_DECODE");
+                if (env && !strcmp(env, "coords"))
+                        v = 1;
+                else if (du_benson_mode()) {
+                        v = 1;
+                        if (env && (!strcmp(env, "proven") ||
+                                    !strcmp(env, "dubna") ||
+                                    !strcmp(env, "raw")))
+                                v = 0;
+                }
+        }
+        return v;
+}
+
 static const char *const du_action_name[] = {
         "NOP", "+X", "-X", "+Y", "-Y", "UP", "DOWN"
 };
@@ -652,6 +688,75 @@ du_decode_stream_hypothesis(ptr txt, int nwords)
         }
 }
 
+/* Low 24 bits of a FOREX INTEGER word; the high 24 bits are the type tag. */
+static int
+du_coord_value(uint64_t w)
+{
+        uint32_t v = (uint32_t)(w & 0xffffffu);
+
+        if (v & 0x800000u)
+                v |= 0xff000000u;               /* sign-extend negatives */
+        return (int)(int32_t)v;
+}
+
+/* New default for BESM6_DUDKA_PLOT=benson: one frame carries one point.
+ * UP/DOWN first, then all X steps, then all Y steps, then lift the pen so
+ * the next frame starts from a known up state.  [аналог NASA, БЕНСОН-501] */
+static void
+du_decode_stream_coords(ptr txt, int nwords)
+{
+        static int logged;
+        uint64_t wx, wy, wp;
+        int tx, ty, pen, i;
+
+        if (!logged) {
+                logged = 1;
+                du_log("DUDKA: BENSON coords frame X/Y/pen (0.1 mm steps) "
+                       "[аналог NASA, БЕНСОН-501]\n");
+        }
+        if (nwords < 3) {
+                du_log("DUDKA: BENSON coords short frame words=%d\n", nwords);
+                return;
+        }
+        wx = getword(&txt);
+        wy = getword(&txt);
+        wp = getword(&txt);
+        tx = du_coord_value(wx);
+        ty = du_coord_value(wy);
+        pen = du_coord_value(wp) ? 1 : 0;
+
+        if (tx < 0 || tx > ben.limit_x || ty < 0 || ty > ben.limit_y) {
+                du_log("DUDKA: BENSON coords out of range X=%d Y=%d\n", tx, ty);
+                return;
+        }
+        for (i = 3; i < nwords; ++i) {
+                uint64_t w = getword(&txt);
+
+                if (w && niti_debug())
+                        du_log("DUDKA: BENSON coords nonzero pad word=%d\n", i);
+        }
+        if (niti_debug())
+                du_log("DUDKA: BENSON coords X=%d Y=%d pen=%d\n", tx, ty, pen);
+
+        if (pen != (ben.pen_down ? 1 : 0))
+                du_decode_benson_step(0, 0, pen ? 1 : -1);
+        while (ben.x < tx)
+                du_decode_benson_step(1, 0, 0);
+        while (ben.x > tx)
+                du_decode_benson_step(-1, 0, 0);
+        while (ben.y < ty)
+                du_decode_benson_step(0, 1, 0);
+        while (ben.y > ty)
+                du_decode_benson_step(0, -1, 0);
+        if (pen)
+                du_decode_benson_step(0, 0, -1);
+        /* The proven plotter.cpp renderer flushes a path only when a move
+         * arrives with the pen up.  Step out and back with the pen up so the
+         * stroke just drawn reaches benson.svg; the position is restored. */
+        du_decode_benson_step(1, 0, 0);
+        du_decode_benson_step(-1, 0, 0);
+}
+
 /* Proven extraction: six 8-bit bytes per 48-bit word, in BytePointer order.
  * The bytes are forwarded to the Dubna plotter bridge; the raw plot.dat has
  * already been written by niti_plot_write(), so its SHA never depends on
@@ -667,11 +772,15 @@ du_decode_stream(ptr txt, int nwords)
                 du_decode_stream_hypothesis(txt, nwords);
                 return;
         }
+        if (du_decode_coords()) {
+                du_decode_stream_coords(txt, nwords);
+                return;
+        }
         if (!logged) {
                 logged = 1;
                 if (du_benson_mode())
                         du_log("DUDKA: BENSON codec, 6 bytes/word BytePointer "
-                               "order [аналог NASA, БЕНСОН-501]\n");
+                               "order (legacy) [аналог NASA, БЕНСОН-501]\n");
                 else
                         du_log("DUDKA: DECODE proven 6 bytes/word BytePointer order "
                                "[аналог CalComp]\n");
@@ -720,8 +829,9 @@ niti_frame(ptr txt, int nwords)
         du_log("DUDKA: FRAME %u words=%d\n", niti_frames, nwords);
         du_decode_stream(txt, nwords);  /* txt is passed by value: still at start */
         if (du_benson_mode())
-                du_log("DUDKA: BENSON codec commands=%u page=%u "
+                du_log("DUDKA: BENSON codec %s commands=%u page=%u "
                        "[аналог NASA, БЕНСОН-501]\n",
+                       du_decode_coords() ? "coords" : "legacy-6bytes",
                        du_plot_bytes, niti_frames);
         else
                 du_log("DUDKA: DUBNA-PLOT device=%s bytes=%u page=%u %s\n",
